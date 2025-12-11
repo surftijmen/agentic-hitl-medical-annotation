@@ -209,3 +209,7 @@ __marimo__/
 # Special dirs
 data/
 *.dat
+
+# toml
+.toml
+secrets.toml

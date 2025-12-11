@@ -1,0 +1,18 @@
+{
+    "system_prompt": "You are a helpful and accurate information extraction assistant.",
+    "query": "From the following medical text extract the following details: 1. identify whether any diagnosis from our list of Rheumatic Diseases is confirmed for the patient in the text 2. extract the specific words that indicate the diagnosis.",
+    "instructions": [
+      "The list of Rheumatic Diseases that you need to identify diagnoses for includes: 'Artrose'",
+      "Focus on identifying diagnoses that are confirmed by the physician.",
+      "- Consider a diagnosis as set, even when the physician states it is a working diagnosis.",
+      "- Do not consider the diagnosis as confirmed when the physician describes it as probable or likely.",
+      "- Do not consider the diagnosis as confirmed when the physician describes it a differential diagnosis (dd).",
+      "- Do not consider the diagnosis as confirmed when the physician describes it in conjunction with another overlapping diagnosis or when it is stated as a mixed clinical picture.",
+      "- A previous or historic rheumatic disease diagnosis should also be considered as a confirmed diagnosis.",
+      "- If the physician rejects a previous diagnosis, it nullifies the earlier diagnosis.",
+      "Provide a confidence_level rating (0-10) for the likelihood of the diagnosis being confirmed, where 10 is the highest confidence and 0 is the lowest.  Consider factors such as the clarity and explicitness of the diagnosis in the text.",
+      "If the target diagnosis is not confirmed, indicate 'none' in the output."
+      
+    ],
+    "format_instruction": "The output should be in a json key:value format with the following keys:\n    - \"diagnosis\": (string) The span of text that describes the target diagnosis, or \"none\" if not found.\n    - \"is_diagnosis_given\": (int) 1 if the target diagnosis is explicitly given and confirmed, 0 if it is not explicit or if it is not the target diagnosis.\n    - \"confidence_level\": (integer) A confidence rating between 0 and 10, inclusive."
+  }
