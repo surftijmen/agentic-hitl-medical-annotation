@@ -11,11 +11,11 @@ from os.path import join
 from google import genai
 from google.genai import types
 import toml
-
+import pandas as pd
 
 data = toml.load("./secrets.toml")
+train_df = pd.read_csv("data/train.dat", sep="\t", header=None, names=["label", "text"])
 
-print(data["api"])
 
 # =========================
 # CONFIG
@@ -160,5 +160,32 @@ def main():
         print(f"\nError: {result['error']}")
 
 
+def random_test():
+    # Load prompt
+    prompt_dict = load_prompt_dict("prompts/test_prompt.json")
+
+    # Select one medical record
+    sample_text = train_df.sample(1)["text"].values[0]
+    print("Sample text:", sample_text)
+
+    # Build the full prompt
+    full_prompt = build_user_prompt(
+        prompt_dict=prompt_dict,
+        input_text=sample_text
+    )
+    print("\n\n===== FINAL PROMPT SENT TO MODEL =====\n")
+    print(full_prompt)
+
+    # Run annotator
+    result = analyze_medical_text(
+        medical_text=sample_text,
+        prompt_dict=prompt_dict
+    )
+
+    print("\n\n===== RESULT =====\n")
+    print(result)
+
+
 if __name__ == "__main__":
-    main()
+    #main()
+    random_test()
