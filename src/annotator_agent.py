@@ -14,7 +14,6 @@ from google.genai import types
 data = toml.load("./secrets.toml")
 GEMINI_API_KEY = data["api"]["key"]
 
-# You can try "gemini-2.5" or "gemini-3" for better structured extraction
 MODEL_NAME = "gemini-2.5-flash"
 
 client = genai.Client(api_key=GEMINI_API_KEY)

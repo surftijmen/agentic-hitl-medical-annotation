@@ -1,12 +1,9 @@
 {
     "system_prompt": "You are a helpful and accurate information extraction assistant.",
-    "query": "From the following medical text extract the following details: 1. identify wich diagnosis from our list of diseases is confirmed for the patient in the text 2. extract the specific words that indicate the diagnosis.",
+    "query": "From the following medical text extract the following details: identify wich diagnosis from our list of diseases is confirmed for the patient in the text",
     "instructions": [
       "The list of diseases that you need to identify diagnoses for includes: 'digestive system diseases, cardiovascular diseases, neoplasms, nervous system diseases, and general pathological conditions'",
-      "Focus on identifying diagnoses that are confirmed by the patient.",
-      "There is always a diagnosis",
-      "- Do always pick an answer from the provided list of diseases, if you are not sure pick the most likely",
-      "Provide a confidence_level rating (0-10) for the likelihood of the diagnosis being confirmed, where 10 is the highest confidence and 0 is the lowest.  Consider factors such as the clarity and explicitness of the diagnosis in the text."      
+      "- Do always pick an answer from the provided list of diseases, if you are not sure pick the most likely"
     ],
-    "format_instruction": "The output should be in a json key:value format with the following keys:\n    - \"diagnosis\": (string) The span of text that describes the target diagnosis\n    - \"is_diagnosis_given\": (int) 1 if the target diagnosis is explicitly given and confirmed, 0 if it is not explicit or if it is not the target diagnosis.\n    - \"confidence_level\": (integer) A confidence rating between 0 and 10, inclusive."
+    "format_instruction": ""
   }
