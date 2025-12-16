@@ -1,37 +1,32 @@
-"""
-Medical Text Extraction using Google Gemini API
-MOST RECENT SDK (google-genai)
-Uses system instructions per latest docs
-"""
-
 import json
 import re
 from typing import Optional, List, Dict
 from os.path import join
+import pandas as pd
+import toml
 from google import genai
 from google.genai import types
-import toml
-import pandas as pd
+
+# =========================
+# LOAD DATA AND CONFIG
+# =========================
 
 data = toml.load("./secrets.toml")
-train_df = pd.read_csv("data/train.dat", sep="\t", header=None, names=["label", "text"])
-
-
-# =========================
-# CONFIG
-# =========================
-
 GEMINI_API_KEY = data["api"]["key"]
+
+# You can try "gemini-2.5" or "gemini-3" for better structured extraction
 MODEL_NAME = "gemini-2.5-flash"
 
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+train_df = pd.read_csv("data/train.dat", sep="\t", header=None, names=["label", "text"])
 
 
 # =========================
 # PROMPT LOADING
 # =========================
 
-def load_prompt_dict(path: str = join("prompts", "test_prompt.json")) -> Dict:
+def load_prompt_dict(path: str = join("prompts", "medical_text_prompt.json")) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -76,6 +71,13 @@ def build_user_prompt(
 # =========================
 
 def extract_results(llm_output: str) -> Dict:
+    """
+    Extract JSON from model output robustly
+    """
+    print("\n\n===== MODEL OUTPUT =====\n")
+    print(llm_output)
+
+    # Use regex to capture JSON object
     match = re.search(r"\{.*\}", llm_output, re.DOTALL)
 
     if not match:
@@ -103,7 +105,7 @@ def extract_results(llm_output: str) -> Dict:
 
 
 # =========================
-# GEMINI INFERENCE (NEW API)
+# GEMINI INFERENCE
 # =========================
 
 def analyze_medical_text(
@@ -132,7 +134,7 @@ def analyze_medical_text(
 
 
 # =========================
-# MAIN
+# MAIN FUNCTION
 # =========================
 
 def main():
@@ -160,30 +162,44 @@ def main():
         print(f"\nError: {result['error']}")
 
 
+# =========================
+# RANDOM TEST FUNCTION
+# =========================
+
 def random_test():
-    # Load prompt
-    prompt_dict = load_prompt_dict("prompts/test_prompt.json")
+    prompt_dict = load_prompt_dict("prompts/medical_text_prompt.json")
 
-    # Select one medical record
-    sample_text = train_df.sample(1)["text"].values[0]
-    print("Sample text:", sample_text)
+    LABEL_NAMES = {
+        1: "Digestive System Diseases",
+        2: "Cardiovascular Diseases",
+        3: "Neoplasms",
+        4: "Nervous System Diseases",
+        5: "General Pathological Conditions",
+    }
 
-    # Build the full prompt
-    full_prompt = build_user_prompt(
-        prompt_dict=prompt_dict,
-        input_text=sample_text
-    )
-    print("\n\n===== FINAL PROMPT SENT TO MODEL =====\n")
-    print(full_prompt)
+    # Sample one row (text + label)
+    sample = train_df.sample(1).iloc[0]
+    sample_text = sample["text"]
+    true_label_id = sample["label"]
+    true_label_name = LABEL_NAMES.get(true_label_id, "Unknown")
 
-    # Run annotator
+    print("=" * 80)
+    print("Sample text:")
+    print(sample_text)
+
+    # Run model
     result = analyze_medical_text(
         medical_text=sample_text,
         prompt_dict=prompt_dict
     )
 
-    print("\n\n===== RESULT =====\n")
-    print(result)
+    print("\n\n===== CORRECT ANSWER =====\n")
+    print(f"{true_label_id} -> {true_label_name}")
+
+    print("\n\n===== MODEL PREDICTION =====\n")
+    print(f"Diagnosis: {result.get('diagnosis')}")
+    print(f"Is Diagnosis Given: {result.get('is_diagnosis_given')}")
+    print(f"Confidence Level: {result.get('confidence_level')}")
 
 
 if __name__ == "__main__":
