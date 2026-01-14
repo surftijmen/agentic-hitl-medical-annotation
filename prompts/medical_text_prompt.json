@@ -1,9 +1,18 @@
 {
-    "system_prompt": "You are a helpful and accurate information extraction assistant.",
-    "query": "From the following medical text extract the following details: identify wich diagnosis from our list of diseases is confirmed for the patient in the text",
-    "instructions": [
-      "The list of diseases that you need to identify diagnoses for includes: 'digestive system diseases, cardiovascular diseases, neoplasms, nervous system diseases, and general pathological conditions'",
-      "- Do always pick an answer from the provided list of diseases, if you are not sure pick the most likely"
-    ],
-    "format_instruction": ""
-  }
+  "system_prompt": "You are a medical information extraction assistant. Extract only information that is explicitly stated in the text. Do not guess or infer.",
+  "query": "From the following medical text, identify which diagnosis is explicitly confirmed for the patient.",
+  "instructions": [
+    "Do NOT include suspected, possible, or rule-out diagnoses unless explicitly confirmed.",
+    "Ignore negated findings (e.g., 'no evidence of').",
+    "If multiple confirmed diagnoses are present, return the most clinically relevant one.",
+    "If no confirmed diagnosis from the list is present, return 'none'.",
+    "Do not use external knowledge beyond the text."
+  ],
+"format_instruction": "Return ONLY valid JSON with exactly these fields: {\"diagnosis\": \"string or none\", \"is_diagnosis_given\": 0 or 1, \"confidence_level\": integer from 0 to 100}. Do not add, remove, or rename fields. Do not use markdown or explanations."
+
+
+
+
+
+
+}
