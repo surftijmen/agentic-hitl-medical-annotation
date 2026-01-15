@@ -11,21 +11,16 @@ class Annotator:
     def __init__(
         self,
         model_name: str = "gemini-2.5-flash",
-        mimic_notes_path: str = "data/mimiciii_notes.parquet",
-        mimic_adm_path: str = "data/mimiciii_patients_admissions.parquet",
         prompt_path: str = "prompts/medical_text_prompt.json",
         secrets_path: str = "./secrets.toml",
         debug: bool = False,
     ):
         self.model_name = model_name
-        self.mimic_notes_path = mimic_notes_path
-        self.mimic_adm_path = mimic_adm_path
         self.prompt_path = prompt_path
         self.secrets_path = secrets_path
         self.debug = debug
 
         self._load_client()
-        self._load_data()
         self.prompt_dict = self.load_prompt_dict()
 
     # =========================
@@ -43,23 +38,6 @@ class Annotator:
     def _load_client(self):
         secrets = toml.load(self.secrets_path)
         self.client = genai.Client(api_key=secrets["api"]["key"])
-
-    def _load_data(self):
-        notes_df = pd.read_parquet(
-            self.mimic_notes_path,
-            columns=["ROW_ID", "SUBJECT_ID", "HADM_ID", "TEXT"],
-        )
-
-        adm_df = pd.read_parquet(
-            self.mimic_adm_path,
-            columns=["SUBJECT_ID", "HADM_ID", "DIAGNOSIS"],
-        )
-
-        self.mimic_df = notes_df.merge(
-            adm_df,
-            on=["SUBJECT_ID", "HADM_ID"],
-            how="inner",
-        )
 
     # =========================
     # PROMPT

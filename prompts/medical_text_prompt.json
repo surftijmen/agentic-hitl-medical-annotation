@@ -9,10 +9,4 @@
     "Do not use external knowledge beyond the text."
   ],
 "format_instruction": "Return ONLY valid JSON with exactly these fields: {\"diagnosis\": \"string or none\", \"is_diagnosis_given\": 0 or 1, \"confidence_level\": integer from 0 to 100}. Do not add, remove, or rename fields. Do not use markdown or explanations."
-
-
-
-
-
-
 }
