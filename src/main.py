@@ -16,13 +16,12 @@ def run_pipeline(sample_size=5, debug=False):
     annotator = Annotator(debug=debug)
     store = AnnotationStore()
 
-    reviewer = HumanReviewer()
+    reviewer = HumanReviewer()          # persistent UI
     parser = FeedbackParser()
     evaluator = PerformanceEvaluator()
     prompt_agent = PromptAgent()
 
     batch = sampler.sample_batch(sample_size)
-
     parsed_signals = []
 
     for _, row in batch.iterrows():
@@ -36,8 +35,17 @@ def run_pipeline(sample_size=5, debug=False):
             gold=row["DIAGNOSIS"],
         )
 
-        human_fb = reviewer.review(annotation, row["DIAGNOSIS"])
+        # HUMAN-IN-THE-LOOP (interactive, persistent UI)
+        human_fb = reviewer.review(
+            annotation=annotation,
+            medical_note=text,
+            gold=row["DIAGNOSIS"],   # optional reference
+        )
+
         parsed_signals.append(parser.parse(human_fb))
+
+    # close UI once, after all reviews
+    reviewer.close()
 
     metrics = evaluator.evaluate(parsed_signals)
 
@@ -50,4 +58,4 @@ def run_pipeline(sample_size=5, debug=False):
 
 
 if __name__ == "__main__":
-    df, feedback = run_pipeline(sample_size=10, debug=True)
+    df, feedback = run_pipeline(sample_size=3, debug=False)
