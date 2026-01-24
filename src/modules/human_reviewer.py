@@ -86,7 +86,7 @@ class HumanReviewer:
         )
 
         if gold is not None:
-            self.gold_label.config(text=f"Gold (reference): {gold}")
+            self.gold_label.config(text=f"Real diagnosis: {gold}")
         else:
             self.gold_label.config(text="")
 

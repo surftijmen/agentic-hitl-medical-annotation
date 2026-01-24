@@ -7,13 +7,19 @@ from modules.feedback_parser import FeedbackParser
 from performance_evaluator import PerformanceEvaluator
 from modules.prompt_agent import PromptAgent
 
+from modules.run_logger import log_run
+import uuid
 
-def run_pipeline(sample_size=5, debug=False):
+def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_prompt.json"):
+    run_id = f"run_{uuid.uuid4().hex[:6]}"
     sampler = DataSampler(
         notes_path="data/mimiciii_notes.parquet",
         adm_path="data/mimiciii_patients_admissions.parquet",
     )
-    annotator = Annotator(debug=debug)
+    annotator = Annotator(
+        prompt_path=prompt_path,
+        debug=debug,
+    )
     store = AnnotationStore()
 
     reviewer = HumanReviewer()          # persistent UI
@@ -54,8 +60,8 @@ def run_pipeline(sample_size=5, debug=False):
         metrics,
     )
 
-    return store.to_dataframe(), metrics
+    
 
 
 if __name__ == "__main__":
-    df, feedback = run_pipeline(sample_size=3, debug=False)
+    df, feedback = run_pipeline(sample_size=3, debug=False, prompt_path="logs/prompts/v1_initial.json")
