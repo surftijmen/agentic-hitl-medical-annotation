@@ -60,8 +60,25 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
         metrics,
     )
 
-    
+    proposal = prompt_agent.propose_update(
+        annotator.prompt_dict,
+        metrics,
+        reason="High symptom vs diagnosis confusion",
+    )
+
+    log_run(
+        run_id=run_id,
+        prompt_version=prompt_path,
+        sample_size=sample_size,
+        notes="Neonatal + ICU mix",
+    )
+
+    return store.to_dataframe(), metrics, proposal    
 
 
 if __name__ == "__main__":
-    df, feedback = run_pipeline(sample_size=3, debug=False, prompt_path="logs/prompts/v1_initial.json")
+    df, metrics, proposal = run_pipeline(
+        sample_size=3,
+        debug=False,
+        prompt_path="logs/prompts/v1_initial.json",
+    )
