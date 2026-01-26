@@ -26,6 +26,7 @@ class AnnotationStore:
             "model_confidence": annotation.get("confidence_level"),
             "gold_reference": gold,
             "human_correct": human_feedback.get("correct"),
+            "human_feedback": human_feedback.get("reason"),
             "human_confidence": human_feedback.get("confidence"),
             "error_type": human_feedback.get("error_type"),
             "prompt_version": prompt_version,

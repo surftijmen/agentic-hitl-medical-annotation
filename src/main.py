@@ -4,7 +4,7 @@ Orchestrates sampling, annotation, human review, and prompt improvement.
 """
 
 import os
-import uuid
+from datetime import datetime
 
 # Agent and utility imports
 from modules.annotator_agent import Annotator
@@ -32,7 +32,8 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
     # ============================================================
     # 1. INITIALIZATION
     # ============================================================
-    run_id = f"run_{uuid.uuid4().hex[:6]}"
+    version = datetime.now().strftime("v%Y%m%d_%H%M%S")
+    run_id = f"run_{version}"
     
     # Initialize all pipeline components
     sampler = DataSampler(
