@@ -123,8 +123,6 @@ class Annotator:
     # =========================
 
     def extract_results(self, llm_output: str) -> Dict:
-        self._log("\n===== MODEL RAW OUTPUT =====\n")
-        self._log(llm_output)
 
         match = re.search(r"\{.*\}", llm_output, re.DOTALL)
 

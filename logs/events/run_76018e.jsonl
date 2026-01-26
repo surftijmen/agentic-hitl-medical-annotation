@@ -1,3 +1,0 @@
-{"timestamp": "2026-01-26T16:17:18.934689", "run_id": "run_76018e", "event": "RUN_STARTED", "payload": {"prompt_version": "logs/prompts/v1_initial.json", "sample_size": 1}}
-{"timestamp": "2026-01-26T16:17:18.941583", "run_id": "run_76018e", "event": "SAMPLE_SELECTED", "payload": {"subject_id": 26588, "hadm_id": 149063}}
-{"timestamp": "2026-01-26T16:17:26.108571", "run_id": "run_76018e", "event": "ANNOTATION_PRODUCED", "payload": {"subject_id": 26588, "hadm_id": 149063, "diagnosis": "Pneumonia", "confidence": 100}}

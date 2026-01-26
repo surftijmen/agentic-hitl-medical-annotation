@@ -21,7 +21,7 @@ class EventLogger:
         }
 
         if self.debug:
-            print(f"\n==={event_type} ===")
+            print(f"\n===== {event_type} =====")
             pprint(payload)
 
         with open(self.path, "a", encoding="utf-8") as f:

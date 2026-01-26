@@ -12,6 +12,7 @@ class PerformanceEvaluator:
 
         precision = 1 - (errors / total) if total else 0.0
 
+        # TODO compare to last run? or in case we have a loop do all current runs in a loop?
         alerts = []
         if precision < 0.8:
             alerts.append("Annotation precision dropped")

@@ -1,7 +1,0 @@
-{"timestamp": "2026-01-26T16:22:34.055813", "run_id": "run_4951f6", "event": "RUN_STARTED", "payload": {"prompt_version": "logs/prompts/v1_initial.json", "sample_size": 1}}
-{"timestamp": "2026-01-26T16:22:34.061440", "run_id": "run_4951f6", "event": "SAMPLE_SELECTED", "payload": {"subject_id": 26588, "hadm_id": 149063}}
-{"timestamp": "2026-01-26T16:22:41.308391", "run_id": "run_4951f6", "event": "ANNOTATION_PRODUCED", "payload": {"subject_id": 26588, "hadm_id": 149063, "diagnosis": "Pneumonia", "confidence": 100}}
-{"timestamp": "2026-01-26T16:22:43.529707", "run_id": "run_4951f6", "event": "HUMAN_REVIEW", "payload": {"correct": true, "reason": "sd", "model_confidence": 100}}
-{"timestamp": "2026-01-26T16:22:43.556534", "run_id": "run_4951f6", "event": "METRICS_COMPUTED", "payload": {"precision": 1.0, "hallucinations": 0, "alerts": []}}
-{"timestamp": "2026-01-26T16:22:43.559207", "run_id": "run_4951f6", "event": "PROMPT_PROPOSED", "payload": {"version": "v20260126_172243", "path": "prompts\\v20260126_172243.json", "reason": "High symptom vs diagnosis confusion"}}
-{"timestamp": "2026-01-26T16:22:43.567001", "run_id": "run_4951f6", "event": "RUN_COMPLETED", "payload": {"total_samples": 1}}
