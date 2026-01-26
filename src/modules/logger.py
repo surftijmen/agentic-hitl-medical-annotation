@@ -9,7 +9,7 @@ class EventLogger:
     def __init__(self, run_id: str, base_dir="logs/events", debug=True):
         self.run_id = run_id
         os.makedirs(base_dir, exist_ok=True)
-        self.path = os.path.join(base_dir, f"{run_id}.jsonl")
+        self.path = os.path.join(base_dir, f"{run_id}.json")
         self.debug = debug
 
     def log(self, event_type: str, payload: Dict):

@@ -5,7 +5,7 @@ from typing import Dict
 
 
 class PromptAgent:
-    def __init__(self, prompt_dir="prompts"):
+    def __init__(self, prompt_dir="logs/prompts"):
         self.prompt_dir = prompt_dir
         os.makedirs(prompt_dir, exist_ok=True)
 

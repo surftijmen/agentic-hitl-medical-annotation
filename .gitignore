@@ -213,3 +213,6 @@ data/
 # toml
 .toml
 secrets.toml
+
+# logs
+logs
