@@ -11,17 +11,22 @@ class Annotator:
     def __init__(
         self,
         model_name: str = "gemini-2.5-flash",
-        prompt_path: str = "prompts/medical_text_prompt.json",
+        mimic_notes_path: str = "data/mimiciii_notes.parquet",
+        mimic_adm_path: str = "data/mimiciii_patients_admissions.parquet",
+        prompt_path: str = "logs/prompts/v1_initial.json",
         secrets_path: str = "./secrets.toml",
         debug: bool = False,
     ):
         self.model_name = model_name
+        self.mimic_notes_path = mimic_notes_path
+        self.mimic_adm_path = mimic_adm_path
         self.prompt_path = prompt_path
         self.secrets_path = secrets_path
         self.debug = debug
 
-        self._load_client()
+        self.prompt_version = prompt_path
         self.prompt_dict = self.load_prompt_dict()
+        self._load_client()
 
     # =========================
     # INTERNAL UTIL

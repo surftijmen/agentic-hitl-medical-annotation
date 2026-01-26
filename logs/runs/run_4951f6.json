@@ -1,0 +1,10 @@
+{
+  "run_id": "run_4951f6",
+  "timestamp": "2026-01-26T16:22:43.560247",
+  "prompt_version": "logs/prompts/v1_initial.json",
+  "sample_size": 1,
+  "sampler": "random",
+  "model": "gemini-2.5-flash",
+  "reviewers": 2,
+  "notes": "Demo run"
+}

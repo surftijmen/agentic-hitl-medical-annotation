@@ -1,0 +1,15 @@
+[
+  {
+    "timestamp":"2026-01-26T16:22:43.534333",
+    "subject_id":26588,
+    "hadm_id":149063,
+    "note_text":"addendum to the above note: family meeting held with icu tema family and dr. . dr, explained to family that his prognosis was poor and with this resistant acenibacter pneumonia chances of pt recovering from this was poor. after much discussion amongst themselves the family has made him dnr and no further invasive procedures. family not ready to make pt cmo. will continue to offer emotional support to family.",
+    "model_diagnosis":"Pneumonia",
+    "model_confidence":100,
+    "gold_reference":"CHRONIC LYMPHOCYTIC LEUKEMIA;SHORTNESS OF BREATH",
+    "human_correct":true,
+    "human_confidence":null,
+    "error_type":null,
+    "prompt_version":"logs\/prompts\/v1_initial.json"
+  }
+]
