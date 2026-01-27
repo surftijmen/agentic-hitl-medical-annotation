@@ -11,6 +11,8 @@ The framework is inspired by adaptive HITL systems such as ARIA, but emphasizes:
 - controlled self-improvement
 - explicit separation between system behavior and evaluation
 
+![Diagram](docs/diagram.png)
+
 ---
 
 ## Core Idea
