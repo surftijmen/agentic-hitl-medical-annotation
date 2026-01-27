@@ -118,8 +118,7 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
     # ============================================================
     proposal = prompt_agent.propose_update(
         annotator.prompt_dict,
-        metrics,
-        reason="High symptom vs diagnosis confusion",
+        parsed_signals
     )
     
     logger.log("PROMPT_PROPOSED", proposal)

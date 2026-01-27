@@ -36,7 +36,7 @@ class EventLogger:
 
         record = {
             "run_id": self.run_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "prompt_version": prompt_version,
             "sample_size": sample_size,
             "sampler": "random",  # or "hard_cases_v1"
