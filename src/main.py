@@ -35,6 +35,8 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
     version = datetime.now().strftime("v%Y%m%d_%H%M%S")
     run_id = f"run_{version}"
     
+    print("--- Initializing modules ---")
+
     # Initialize all pipeline components
     sampler = DataSampler(
         notes_path="data/mimiciii_notes.parquet",
@@ -113,6 +115,8 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
     metrics = evaluator.evaluate(parsed_signals)
     logger.log("METRICS_COMPUTED", metrics)
     
+    print("\n --- Loading LLM to refine prompt... ---")
+
     # ============================================================
     # 5. PROMPT IMPROVEMENT PROPOSAL
     # ============================================================
@@ -149,7 +153,7 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
 if __name__ == "__main__":
     # Example execution with single sample for testing
     df, metrics, proposal = run_pipeline(
-        sample_size=1,
+        sample_size=3,
         debug=True,
         prompt_path="logs/prompts/v1_initial.json",
     )
