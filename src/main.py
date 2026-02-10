@@ -1,8 +1,3 @@
-"""
-Medical Text Annotation Pipeline
-Orchestrates sampling, annotation, human review, and prompt improvement.
-"""
-
 import os
 from datetime import datetime
 
@@ -42,7 +37,7 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
         notes_path="data/mimiciii_notes.parquet",
         adm_path="data/mimiciii_patients_admissions.parquet",
     )
-    annotator = Annotator(prompt_path=prompt_path, debug=debug)
+    annotator = Annotator(prompt_path=prompt_path, debug=debug, use_rag=True)
     store = AnnotationStore()
     reviewer = HumanReviewer()  # Persistent UI for human feedback
     parser = FeedbackParser()
@@ -102,6 +97,11 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
             human_feedback=human_fb,
             prompt_version=annotator.prompt_version,
         )
+
+
+        # RAG
+        HumanReviewer.store_validated_case(annotator.rag, text, annotation, human_fb)
+
         
         # Parse feedback for performance evaluation
         parsed_signals.append(parser.parse(human_fb))

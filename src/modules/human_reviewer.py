@@ -186,6 +186,34 @@ class HumanReviewer:
             **self.result,
             "model_confidence": annotation.get("confidence_level", 0),
         }
+    
+    def store_validated_case(rag, note, model_output, human_feedback):
+
+        final_diagnosis = (
+            model_output["diagnosis"]
+            if human_feedback["correct"]
+            else human_feedback.get("corrected_diagnosis")
+        )
+
+        # Clean summary for retrieval (very important)
+        retrieval_text = f"""
+        Patient case with diagnosis {final_diagnosis}.
+        {note[:500]}
+        """
+
+        record = {
+            "retrieval_text": retrieval_text,
+            "note": note,
+            "final_diagnosis": final_diagnosis,
+            "model_diagnosis": model_output["diagnosis"],
+            "correct": human_feedback["correct"],
+            "failure_mode": human_feedback.get("failure_mode"),
+            "doctor_confidence": human_feedback["confidence"],
+            "model_confidence": model_output.get("confidence_level", 0),
+            "comment": human_feedback.get("comment"),
+        }
+
+        rag.add_case(retrieval_text, record)
 
     def close(self):
         self.root.destroy()

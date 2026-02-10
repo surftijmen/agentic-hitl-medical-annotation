@@ -5,6 +5,7 @@ import pandas as pd
 import toml
 from google import genai
 from google.genai import types
+from rag_memory import RAGMemory
 
 
 class Annotator:
@@ -16,6 +17,7 @@ class Annotator:
         prompt_path: str = "logs/prompts/v1_initial.json",
         secrets_path: str = "./secrets.toml",
         debug: bool = False,
+        use_rag: bool = False,
     ):
         self.model_name = model_name
         self.mimic_notes_path = mimic_notes_path
@@ -23,7 +25,8 @@ class Annotator:
         self.prompt_path = prompt_path
         self.secrets_path = secrets_path
         self.debug = debug
-
+        self.use_rag = use_rag
+        self.rag = RAGMemory() if use_rag else None
         self.prompt_version = prompt_path
         self.prompt_dict = self.load_prompt_dict()
         self._load_client()
@@ -154,7 +157,22 @@ class Annotator:
     # =========================
 
     def analyze_medical_text(self, medical_text: str) -> Dict:
-        user_prompt = self.build_user_prompt(input_text=medical_text)
+        retrieved_examples = []
+
+        if self.use_rag:
+            retrieved = self.rag.search(medical_text, k=3)
+
+            for r in retrieved:
+                retrieved_examples.append(
+                    f"Past case → Diagnosis: {r['final_diagnosis']} | "
+                    f"Failure: {r.get('failure_mode')} | "
+                    f"Summary: {r['retrieval_text']}"
+                )
+
+        user_prompt = self.build_user_prompt(
+            input_text=medical_text,
+            examples=retrieved_examples if retrieved_examples else None
+        )
 
         config = types.GenerateContentConfig(
             system_instruction=self.prompt_dict.get("system_prompt", ""),
