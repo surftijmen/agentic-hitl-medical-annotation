@@ -6,7 +6,7 @@ class DataSampler:
         self,
         notes_path: str,
         adm_path: str,
-        seed: int = 42,
+        seed: int = 12,
     ):
         notes_df = pd.read_parquet(
             notes_path,

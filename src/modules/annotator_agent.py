@@ -5,8 +5,7 @@ import pandas as pd
 import toml
 from google import genai
 from google.genai import types
-from rag_memory import RAGMemory
-
+from modules.rag_memory import RAGMemory
 
 class Annotator:
     def __init__(
@@ -162,6 +161,10 @@ class Annotator:
         if self.use_rag:
             retrieved = self.rag.search(medical_text, k=3)
 
+            print(f"    Retrieved {len(retrieved)} similar past cases for RAG context")
+            print(f"    RAG retrieved cases:")
+            print(retrieved)
+
             for r in retrieved:
                 retrieved_examples.append(
                     f"Past case → Diagnosis: {r['final_diagnosis']} | "
@@ -177,7 +180,7 @@ class Annotator:
         config = types.GenerateContentConfig(
             system_instruction=self.prompt_dict.get("system_prompt", ""),
             temperature=0.0,
-            max_output_tokens=3000,
+            max_output_tokens=50000,
         )
 
         response = self.client.models.generate_content(

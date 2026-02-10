@@ -34,3 +34,33 @@ class AnnotationStore:
 
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame(self.records)
+
+    def build_retrieval_text(self, note: str, final_dx: str) -> str:
+        note_short = note[:400]
+        return f"""
+        Patient case diagnosed with {final_dx}.
+        Key context: {note_short}
+        """.strip()
+
+    def to_rag_record(self, record):
+
+        if record["human_correct"] is False:
+            return None
+
+        final_dx = record["model_diagnosis"]
+
+        retrieval_text = self.build_retrieval_text(
+            record["note_text"],
+            final_dx
+        )
+
+        return {
+            "retrieval_text": retrieval_text,
+            "final_diagnosis": final_dx,
+            "model_diagnosis": record["model_diagnosis"],
+            "correct": record["human_correct"],
+            "failure_mode": record["error_type"],
+            "doctor_confidence": record["human_confidence"],
+            "model_confidence": record["model_confidence"],
+            "note_text": record["note_text"],
+        }

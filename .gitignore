@@ -216,3 +216,5 @@ secrets.toml
 
 # logs
 logs
+rag_meta.json
+rag.index

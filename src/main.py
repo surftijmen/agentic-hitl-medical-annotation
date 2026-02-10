@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from typing import Optional
 
 # Agent and utility imports
 from modules.annotator_agent import Annotator
@@ -15,6 +16,7 @@ from performance_evaluator import PerformanceEvaluator
 def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_prompt.json"):
     """
     Execute the full annotation pipeline with human-in-the-loop review.
+    Optimized for faster initialization and reduced waiting times.
     
     Args:
         sample_size: Number of medical notes to process
@@ -25,25 +27,35 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
         tuple: (annotations_df, performance_metrics, prompt_proposal)
     """
     # ============================================================
-    # 1. INITIALIZATION
+    # 1. INITIALIZATION (with progress feedback)
     # ============================================================
     version = datetime.now().strftime("v%Y%m%d_%H%M%S")
     run_id = f"run_{version}"
     
+    print("=" * 60)
+    print("MEDICAL ANNOTATION PIPELINE")
+    print("=" * 60)
+    print()
     print("--- Initializing modules ---")
 
-    # Initialize all pipeline components
+    # Initialize lightweight components first
+    print("  [1/8] Initializing logger...", end=" ")
+    logger = EventLogger(run_id, debug=debug)
+    
+    print("  [2/8] Initializing storage...", end=" ")
+    store = AnnotationStore()
+    parser = FeedbackParser()
+    
+    # Load data (can be slow for large parquet files)
+    print("  [3/8] Loading medical data...", end=" ", flush=True)
     sampler = DataSampler(
         notes_path="data/mimiciii_notes.parquet",
         adm_path="data/mimiciii_patients_admissions.parquet",
     )
+    
+    # Initialize AI annotator (RAG + API client)
+    print("  [4/8] Initializing AI annotator (this may take a moment)...", end=" ", flush=True)
     annotator = Annotator(prompt_path=prompt_path, debug=debug, use_rag=True)
-    store = AnnotationStore()
-    reviewer = HumanReviewer()  # Persistent UI for human feedback
-    parser = FeedbackParser()
-    evaluator = PerformanceEvaluator()
-    prompt_agent = PromptAgent()
-    logger = EventLogger(run_id, debug=debug)
     
     # Log pipeline start
     logger.log("RUN_STARTED", {
@@ -54,14 +66,16 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
     # ============================================================
     # 2. DATA SAMPLING
     # ============================================================
+    print("  [5/8] Sampling medical notes...", end=" ")
     batch = sampler.sample_batch(sample_size)
     
     # ============================================================
-    # 3. ANNOTATION & REVIEW LOOP
+    # 3. BATCH ANNOTATION (ALL AT ONCE)
     # ============================================================
-    parsed_signals = []
+    print("  [6/8] Generating annotations...")
+    annotation_batch = []
     
-    for _, row in batch.iterrows():
+    for idx, (_, row) in enumerate(batch.iterrows(), 1):
         # Clean and prepare medical note text
         text = Annotator.clean_mimic_note(row["TEXT"])
         
@@ -70,62 +84,104 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
             "hadm_id": row["HADM_ID"]
         })
         
+        print(f"    [{idx}/{sample_size}] Processing subject {row['SUBJECT_ID']}...", end=" ", flush=True)
+        
         # Generate AI annotation
         annotation = annotator.analyze_medical_text(text)
+        
+        print(f"{annotation.get('diagnosis', 'N/A')}")
         
         logger.log("ANNOTATION_PRODUCED", {
             "diagnosis": annotation["diagnosis"],
             "confidence": annotation["confidence_level"]
         })
         
+        # Store annotation data for review
+        annotation_batch.append({
+            "subject_id": row["SUBJECT_ID"],
+            "hadm_id": row["HADM_ID"],
+            "text": text,
+            "annotation": annotation,
+            "gold": row["DIAGNOSIS"]
+        })
+    
+    print(f"  All {len(annotation_batch)} annotations generated")
+    
+    # ============================================================
+    # 4. HUMAN REVIEW (LAZY UI INITIALIZATION)
+    # ============================================================
+    print("  [7/8] Initializing review UI...", end=" ", flush=True)
+    reviewer = HumanReviewer()  # Initialize UI only when needed
+    
+    print()
+    print("=" * 60)
+    print("HUMAN REVIEW SESSION")
+    print("=" * 60)
+    print(f"Please review {len(annotation_batch)} annotations in the UI window")
+    print()
+    
+    parsed_signals = []
+    
+    for idx, item in enumerate(annotation_batch, 1):
+        print(f"[{idx}/{len(annotation_batch)}] Waiting for review (Subject: {item['subject_id']})...", flush=True)
+        
         # Human-in-the-loop review (interactive UI)
         human_fb = reviewer.review(
-            annotation=annotation,
-            medical_note=text,
-            gold=row["DIAGNOSIS"],
+            annotation=item["annotation"],
+            medical_note=item["text"],
+            gold=item["gold"],
         )
         
         logger.log("HUMAN_REVIEW", human_fb)
         
         # Store complete annotation record
         store.add(
-            subject_id=row["SUBJECT_ID"],
-            hadm_id=row["HADM_ID"],
-            note_text=text,
-            annotation=annotation,
-            gold=row["DIAGNOSIS"],
+            subject_id=item["subject_id"],
+            hadm_id=item["hadm_id"],
+            note_text=item["text"],
+            annotation=item["annotation"],
+            gold=item["gold"],
             human_feedback=human_fb,
             prompt_version=annotator.prompt_version,
         )
 
-
-        # RAG
-        HumanReviewer.store_validated_case(annotator.rag, text, annotation, human_fb)
-
+        # Store validated case in RAG if correct
+        rag_record = store.to_rag_record(store.records[-1])
+        if rag_record:
+            annotator.rag.add_case(
+                rag_record["retrieval_text"],
+                rag_record
+            )
         
         # Parse feedback for performance evaluation
         parsed_signals.append(parser.parse(human_fb))
     
     # Close the review UI after all samples processed
     reviewer.close()
+    print(" All reviews completed")
     
     # ============================================================
-    # 4. PERFORMANCE EVALUATION
+    # 5. POST-PROCESSING (LAZY INITIALIZATION)
     # ============================================================
+    print("  [8/8] Analyzing results...")
+    
+    # Initialize evaluator only when needed
+    evaluator = PerformanceEvaluator()
     metrics = evaluator.evaluate(parsed_signals)
     logger.log("METRICS_COMPUTED", metrics)
+    print("  Performance metrics computed")
     
-    print("\n --- Loading LLM to refine prompt... ---")
-
-    # ============================================================
-    # 5. PROMPT IMPROVEMENT PROPOSAL
-    # ============================================================
+    # Initialize prompt agent only when needed (may load LLM)
+    print("    Loading LLM for prompt refinement...", end=" ", flush=True)
+    prompt_agent = PromptAgent()
+    
     proposal = prompt_agent.propose_update(
         annotator.prompt_dict,
         parsed_signals
     )
     
     logger.log("PROMPT_PROPOSED", proposal)
+    print(" Prompt improvement proposal generated")
     
     # ============================================================
     # 6. PERSIST RESULTS
@@ -147,11 +203,20 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
         "store_path": store_path
     })
     
+    print()
+    print("=" * 60)
+    print("PIPELINE COMPLETE")
+    print("=" * 60)
+    print(f"Results saved to: {store_path}")
+    print(f"Total samples: {len(df)}")
+    print(f"Accuracy: {metrics.get('accuracy', 'N/A')}")
+    print()
+    
     return df, metrics, proposal
 
 
 if __name__ == "__main__":
-    # Example execution with single sample for testing
+    # Example execution
     df, metrics, proposal = run_pipeline(
         sample_size=3,
         debug=True,
