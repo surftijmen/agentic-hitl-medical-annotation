@@ -155,40 +155,34 @@ class Annotator:
     # GEMINI INFERENCE
     # =========================
 
+    # Inside your Annotator class
     def analyze_medical_text(self, medical_text: str) -> Dict:
-        retrieved_examples = []
-
-        if self.use_rag:
-            retrieved = self.rag.search(medical_text, k=3)
-
-            print(f"    Retrieved {len(retrieved)} similar past cases for RAG context")
-            print(f"    RAG retrieved cases:")
-            print(retrieved)
-
-            for r in retrieved:
-                retrieved_examples.append(
-                    f"Past case → Diagnosis: {r['final_diagnosis']} | "
-                    f"Failure: {r.get('failure_mode')} | "
-                    f"Summary: {r['retrieval_text']}"
-                )
-
-        user_prompt = self.build_user_prompt(
-            input_text=medical_text,
-            examples=retrieved_examples if retrieved_examples else None
+        # 1. Define the RAG Tool (pointing to your Vertex AI Datastore)
+        # The datastore ID is found in your Google Cloud Console
+        datastore_path = f"projects/{self.project_id}/locations/global/collections/default_collection/dataStores/{self.datastore_id}"
+        
+        rag_tool = types.Tool(
+            retrieval=types.Retrieval(
+                vertex_ai_search=types.VertexAISearch(datastore=datastore_path)
+            )
         )
 
+        # 2. Add the tool to your config
         config = types.GenerateContentConfig(
             system_instruction=self.prompt_dict.get("system_prompt", ""),
             temperature=0.0,
+            tools=[rag_tool],  # Gemini handles the "Search" step automatically here
             max_output_tokens=50000,
         )
 
+        # 3. Generate content
         response = self.client.models.generate_content(
             model=self.model_name,
-            contents=user_prompt,
+            contents=f"Annotate this medical text: {medical_text}",
             config=config,
         )
 
+        # Note: response.candidates[0].grounding_metadata will contain the citations
         return self.extract_results(response.text)
 
     # =========================

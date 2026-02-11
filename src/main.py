@@ -148,10 +148,25 @@ def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_p
         # Store validated case in RAG if correct
         rag_record = store.to_rag_record(store.records[-1])
         if rag_record:
-            annotator.rag.add_case(
-                rag_record["retrieval_text"],
-                rag_record
+            # Instead of: annotator.rag.add_case(...)
+            # Use the GenAI Client to import the validated note into the Datastore
+            
+            self.client.control.documents.import_data(
+                parent=f"projects/{PROJ}/locations/global/collections/default_collection/dataStores/{DATA_ID}",
+                inline_source=types.InlineSource(
+                    documents=[
+                        types.Document(
+                            content=types.Document.Content(
+                                # We store the human-validated version as the new truth
+                                raw_bytes=rag_record["retrieval_text"].encode() 
+                            ),
+                            # Optional: Add metadata so the RAG knows this is a high-confidence human-reviewed note
+                            user_labels={"status": "human_verified", "version": version}
+                        )
+                    ]
+                )
             )
+            print(f"    [HITL] Grounding store updated with human-verified note.")
         
         # Parse feedback for performance evaluation
         parsed_signals.append(parser.parse(human_fb))
