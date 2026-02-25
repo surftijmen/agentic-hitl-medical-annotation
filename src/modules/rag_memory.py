@@ -1,49 +1,62 @@
 # rag_memory.py
-import faiss
-import numpy as np
-from sentence_transformers import SentenceTransformer
+import time
 import json
 import os
+from google import genai
+from google.genai import types
+import toml
 
 class RAGMemory:
-    def __init__(self, dim=384, index_path="rag.index", meta_path="rag_meta.json"):
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
-        self.dim = dim
-        self.index_path = index_path
-        self.meta_path = meta_path
+    def __init__(self, store_name: str = None, display_name: str = "medical-annotation-rag"):
+        secrets = toml.load("./secrets.toml")
+        self.client = genai.Client(api_key=secrets["api"]["key"])
+        self.display_name = display_name
 
-        if os.path.exists(index_path):
-            self.index = faiss.read_index(index_path)
-            with open(meta_path, "r") as f:
-                self.meta = json.load(f)
+        if store_name:
+            # Resume existing store
+            self.store = self.client.file_search_stores.get(store_name)
         else:
-            self.index = faiss.IndexFlatL2(dim)
-            self.meta = []
+            # Create new store
+            self.store = self.client.file_search_stores.create(
+                config={"display_name": display_name}
+            )
+            print(f"  Created new File Search Store: {self.store.name}")
 
-    def embed(self, text):
-        return self.model.encode([text])[0].astype("float32")
+    @property
+    def store_name(self):
+        return self.store.name
 
-    # ---------- RETRIEVE ----------
-    def search(self, text, k=3):
-        if len(self.meta) == 0:
-            return []
+    def add_case(self, retrieval_text: str, full_record: dict):
+        """Upload a validated case as a searchable text file."""
+        subject_id = full_record.get("subject_id", "unknown")
+        hadm_id = full_record.get("hadm_id", "unknown")
 
-        vec = self.embed(text).reshape(1, -1)
-        D, I = self.index.search(vec, k)
+        # Combine retrieval text + structured metadata into one document
+        content = f"{retrieval_text}\n\n---METADATA---\n{json.dumps(full_record, indent=2)}"
 
-        results = []
-        for idx in I[0]:
-            if idx < len(self.meta):
-                results.append(self.meta[idx])
+        # Write to a temp file and upload
+        tmp_path = f"/tmp/rag_case_{subject_id}_{hadm_id}.txt"
+        with open(tmp_path, "w") as f:
+            f.write(content)
 
-        return results
+        operation = self.client.file_search_stores.upload_to_file_search_store(
+            file=tmp_path,
+            file_search_store_name=self.store.name,
+            config={"display_name": f"case-{subject_id}-{hadm_id}"},
+        )
 
-    # ---------- STORE VALIDATED CASE ----------
-    def add_case(self, retrieval_text, full_record):
-        vec = self.embed(retrieval_text).reshape(1, -1)
-        self.index.add(vec)
-        self.meta.append(full_record)
+        # Wait for indexing
+        while not operation.done:
+            time.sleep(3)
+            operation = self.client.operations.get(operation)
 
-        faiss.write_index(self.index, self.index_path)
-        with open(self.meta_path, "w") as f:
-            json.dump(self.meta, f, indent=2)
+        os.remove(tmp_path)
+        print(f"    RAG: case {subject_id}/{hadm_id} indexed")
+
+    def get_tool(self) -> types.Tool:
+        """Return the Gemini tool config to pass at generation time."""
+        return types.Tool(
+            file_search=types.FileSearch(
+                file_search_store_names=[self.store.name]
+            )
+        )

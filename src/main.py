@@ -7,10 +7,25 @@ from modules.annotator_agent import Annotator
 from modules.sampler_agent import DataSampler
 from modules.annotation_store import AnnotationStore
 from modules.human_reviewer import HumanReviewer
+from modules.rag_memory import RAGMemory
 from modules.feedback_parser import FeedbackParser
 from modules.prompt_agent import PromptAgent
 from modules.logger import EventLogger
 from performance_evaluator import PerformanceEvaluator
+
+STORE_NAME_PATH = "logs/rag_store_name.txt"
+
+def load_or_create_rag(display_name="medical-annotation-rag"):
+    if os.path.exists(STORE_NAME_PATH):
+        with open(STORE_NAME_PATH) as f:
+            store_name = f.read().strip()
+        print(f"  Resuming RAG store: {store_name}")
+        return RAGMemory(store_name=store_name)
+    else:
+        rag = RAGMemory(display_name=display_name)
+        with open(STORE_NAME_PATH, "w") as f:
+            f.write(rag.store_name)
+        return rag
 
 
 def run_pipeline(sample_size=5, debug=False, prompt_path="prompts/medical_text_prompt.json"):

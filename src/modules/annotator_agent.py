@@ -156,31 +156,16 @@ class Annotator:
     # =========================
 
     def analyze_medical_text(self, medical_text: str) -> Dict:
-        retrieved_examples = []
-
-        if self.use_rag:
-            retrieved = self.rag.search(medical_text, k=3)
-
-            print(f"    Retrieved {len(retrieved)} similar past cases for RAG context")
-            print(f"    RAG retrieved cases:")
-            print(retrieved)
-
-            for r in retrieved:
-                retrieved_examples.append(
-                    f"Past case → Diagnosis: {r['final_diagnosis']} | "
-                    f"Failure: {r.get('failure_mode')} | "
-                    f"Summary: {r['retrieval_text']}"
-                )
-
         user_prompt = self.build_user_prompt(
             input_text=medical_text,
-            examples=retrieved_examples if retrieved_examples else None
+            examples=None  # Gemini retrieves from store automatically now
         )
 
         config = types.GenerateContentConfig(
             system_instruction=self.prompt_dict.get("system_prompt", ""),
             temperature=0.0,
             max_output_tokens=50000,
+            tools=[self.rag.get_tool()] if self.use_rag else [],
         )
 
         response = self.client.models.generate_content(
@@ -188,6 +173,16 @@ class Annotator:
             contents=user_prompt,
             config=config,
         )
+
+        # Log what was retrieved (via citations if available)
+        if self.use_rag:
+            candidates = response.candidates or []
+            citations = [
+                part.file_data
+                for candidate in candidates
+                for part in (candidate.grounding_metadata or [])
+            ] if candidates else []
+            print(f"    RAG: Gemini retrieved and grounded on {len(citations)} case(s)")
 
         return self.extract_results(response.text)
 
