@@ -1,11 +1,35 @@
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict
-import pandas as pd
+from collections import Counter
 import toml
 from google import genai
 from google.genai import types
 from modules.rag_memory import RAGMemory
+
+
+# ================================================================
+# TECHNIQUE CONFIG
+# ================================================================
+
+@dataclass
+class TechniqueConfig:
+    """
+    Flags controlling which prompt engineering techniques are active.
+    Each technique is independently togglable for ablation studies.
+    """
+    use_rag: bool = False
+    use_self_consistency: bool = False
+    n_consistency_samples: int = 5
+    consistency_temperature: float = 0.7
+    use_prompt_patching: bool = False      # applied between runs in main.py
+    use_feedback_routing: bool = False     # route failures to rag vs prompt_patch
+
+
+# ================================================================
+# ANNOTATOR
+# ================================================================
 
 class Annotator:
     def __init__(
@@ -16,6 +40,8 @@ class Annotator:
         prompt_path: str = "logs/prompts/v1_initial.json",
         secrets_path: str = "./secrets.toml",
         debug: bool = False,
+        technique_config: TechniqueConfig = None,
+        # Legacy parameter — kept for backwards compatibility
         use_rag: bool = False,
     ):
         self.model_name = model_name
@@ -24,31 +50,39 @@ class Annotator:
         self.prompt_path = prompt_path
         self.secrets_path = secrets_path
         self.debug = debug
-        self.use_rag = use_rag
-        self.rag = RAGMemory() if use_rag else None
+
+        # TechniqueConfig takes precedence; fall back to legacy use_rag flag
+        self.config = technique_config or TechniqueConfig(use_rag=use_rag)
+
+        # RAG is only instantiated if needed — caller should override with
+        # shared instance via annotator.rag = rag to persist across runs
+        self.rag: Optional[RAGMemory] = None
+
         self.prompt_version = prompt_path
         self.prompt_dict = self.load_prompt_dict()
         self._load_client()
 
-    # =========================
-    # INTERNAL UTIL
-    # =========================
+    # ── Properties for backwards compat ─────────────────────────
+
+    @property
+    def use_rag(self) -> bool:
+        return self.config.use_rag
+
+    @use_rag.setter
+    def use_rag(self, value: bool):
+        self.config.use_rag = value
+
+    # ── Internal utils ───────────────────────────────────────────
 
     def _log(self, *args):
         if self.debug:
             print(*args)
 
-    # =========================
-    # SETUP
-    # =========================
-
     def _load_client(self):
         secrets = toml.load(self.secrets_path)
         self.client = genai.Client(api_key=secrets["api"]["key"])
 
-    # =========================
-    # PROMPT
-    # =========================
+    # ── Prompt ───────────────────────────────────────────────────
 
     def load_prompt_dict(self) -> Dict:
         with open(self.prompt_path, "r", encoding="utf-8") as f:
@@ -84,9 +118,7 @@ class Annotator:
 
         return "\n\n".join(parts)
 
-    # =========================
-    # TEXT CLEANING
-    # =========================
+    # ── Text cleaning ────────────────────────────────────────────
 
     @staticmethod
     def clean_mimic_note(text: str) -> str:
@@ -117,15 +149,11 @@ class Annotator:
 
         text = re.sub(r",?\s*M\.D\..*$", "", text, flags=re.I)
         text = re.sub(r"\s+", " ", text)
-
         return text.strip()
 
-    # =========================
-    # OUTPUT PARSING
-    # =========================
+    # ── Output parsing ───────────────────────────────────────────
 
     def extract_results(self, llm_output: str) -> Dict:
-
         match = re.search(r"\{.*\}", llm_output, re.DOTALL)
 
         if not match:
@@ -151,71 +179,125 @@ class Annotator:
         data["raw_output"] = llm_output
         return data
 
-    # =========================
-    # GEMINI INFERENCE
-    # =========================
+    # ── Gemini inference (single call) ───────────────────────────
 
-    def analyze_medical_text(self, medical_text: str) -> Dict:
-        user_prompt = self.build_user_prompt(
-            input_text=medical_text,
-            examples=None  # Gemini retrieves from store automatically now
-        )
-
-        config = types.GenerateContentConfig(
+    def _build_config(self, temperature: float = 0.0) -> types.GenerateContentConfig:
+        return types.GenerateContentConfig(
             system_instruction=self.prompt_dict.get("system_prompt", ""),
-            temperature=0.0,
+            temperature=temperature,
             max_output_tokens=50000,
-            tools=[self.rag.get_tool()] if self.use_rag else [],
+            tools=[self.rag.get_tool()] if self.config.use_rag and self.rag else [],
         )
 
+    def _call_model(self, user_prompt: str, temperature: float = 0.0) -> str:
+        config = self._build_config(temperature)
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=user_prompt,
             config=config,
         )
+        return response
 
-        # Log what was retrieved (via citations if available)
-        if self.use_rag:
-            candidates = response.candidates or []
-            citations = [
-                part.file_data
-                for candidate in candidates
-                for part in (candidate.grounding_metadata or [])
-            ] if candidates else []
-            print(f"    RAG: Gemini retrieved and grounded on {len(citations)} case(s)")
+    def _log_rag_grounding(self, response):
+        grounding_count = 0
+        try:
+            for candidate in (response.candidates or []):
+                meta = getattr(candidate, "grounding_metadata", None)
+                if meta:
+                    chunks = getattr(meta, "grounding_chunks", None) or []
+                    grounding_count += len(chunks)
+        except Exception:
+            pass
+        print(f"    RAG: Gemini retrieved and grounded on {grounding_count} case(s)")
+
+    def analyze_single(self, medical_text: str) -> Dict:
+        """Single inference call at temperature=0."""
+        user_prompt = self.build_user_prompt(input_text=medical_text)
+        response = self._call_model(user_prompt, temperature=0.0)
+
+        if self.config.use_rag:
+            self._log_rag_grounding(response)
 
         return self.extract_results(response.text)
 
-    # =========================
-    # SAMPLING / TESTING
-    # =========================
+    # ── Self-consistency ─────────────────────────────────────────
+
+    def analyze_with_consistency(self, medical_text: str) -> Dict:
+        """
+        Sample the model N times and take the majority vote.
+        Consistency score replaces self-reported confidence — much more meaningful.
+        """
+        n = self.config.n_consistency_samples
+        temp = self.config.consistency_temperature
+        user_prompt = self.build_user_prompt(input_text=medical_text)
+
+        votes = []
+        raw_results = []
+
+        for i in range(n):
+            response = self._call_model(user_prompt, temperature=temp)
+            result = self.extract_results(response.text)
+            votes.append(result.get("diagnosis", "none").lower().strip())
+            raw_results.append(result)
+
+        counts = Counter(votes)
+        majority_diagnosis, majority_count = counts.most_common(1)[0]
+        consistency_score = majority_count / n
+
+        if self.debug:
+            print(f"    Consistency votes: {dict(counts)}")
+
+        # Find the full result object matching the majority diagnosis
+        majority_result = next(
+            (r for r in raw_results if r.get("diagnosis", "").lower().strip() == majority_diagnosis),
+            raw_results[0]
+        )
+
+        return {
+            **majority_result,
+            "diagnosis": majority_result.get("diagnosis"),   # preserve original casing
+            "confidence_level": int(consistency_score * 100),
+            "consistency_score": consistency_score,
+            "vote_distribution": dict(counts),
+            "n_samples": n,
+        }
+
+    # ── Public entrypoint ────────────────────────────────────────
+
+    def analyze_medical_text(self, medical_text: str) -> Dict:
+        """
+        Route to the appropriate inference strategy based on TechniqueConfig.
+        """
+        if self.config.use_self_consistency:
+            return self.analyze_with_consistency(medical_text)
+        else:
+            return self.analyze_single(medical_text)
+
+    # ── Sampling / testing ───────────────────────────────────────
 
     def random_mimic_test(self, n: int = 1):
-        samples = self.mimic_df.sample(n)
+        import pandas as pd
+        mimic_df = pd.read_parquet(self.mimic_notes_path)
+        samples = mimic_df.sample(n)
 
         for _, row in samples.iterrows():
             clean_text = self.clean_mimic_note(row["TEXT"])
-
             self._log("=" * 80)
-            self._log(
-                f"SUBJECT_ID: {row['SUBJECT_ID']} | HADM_ID: {row['HADM_ID']}"
-            )
+            self._log(f"SUBJECT_ID: {row['SUBJECT_ID']} | HADM_ID: {row['HADM_ID']}")
             self._log("\nCLEANED NOTE (TRUNCATED):\n")
             self._log(clean_text[:2000])
 
             result = self.analyze_medical_text(clean_text)
-
             self._log(result)
 
             print("\n===== FINAL INFORMATION =====")
             print(f"Agents diagnosis: {result.get('diagnosis')}")
             print("Actual diagnosis:", row["DIAGNOSIS"])
 
-
             if "error" in result:
                 self._log(f"Error: {result['error']}")
 
-        return (result.get('diagnosis'), row["DIAGNOSIS"])
+        return (result.get("diagnosis"), row["DIAGNOSIS"])
 
 
 if __name__ == "__main__":

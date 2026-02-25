@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 import pandas as pd
 from datetime import datetime
 
@@ -26,9 +26,10 @@ class AnnotationStore:
             "model_confidence": annotation.get("confidence_level"),
             "gold_reference": gold,
             "human_correct": human_feedback.get("correct"),
-            "human_feedback": human_feedback.get("reason"),
+            "human_failure_mode": human_feedback.get("failure_mode"),  # from UI directly
+            "human_comment": human_feedback.get("comment"),
             "human_confidence": human_feedback.get("confidence"),
-            "error_type": human_feedback.get("error_type"),
+            "model_confidence_raw": human_feedback.get("model_confidence"),
             "prompt_version": prompt_version,
         })
 
@@ -37,30 +38,31 @@ class AnnotationStore:
 
     def build_retrieval_text(self, note: str, final_dx: str) -> str:
         note_short = note[:400]
-        return f"""
-        Patient case diagnosed with {final_dx}.
-        Key context: {note_short}
-        """.strip()
+        return f"Patient case diagnosed with {final_dx}.\nKey context: {note_short}".strip()
 
-    def to_rag_record(self, record):
-
-        if record["human_correct"] is False:
+    def to_rag_record(self, record: Dict) -> Optional[Dict]:
+        """
+        Returns a RAG record for validated (correct) cases only.
+        Includes subject_id and hadm_id so RAG deduplication works.
+        """
+        if record.get("human_correct") is not True:
             return None
 
         final_dx = record["model_diagnosis"]
+        if not final_dx or final_dx.lower() == "none":
+            return None
 
-        retrieval_text = self.build_retrieval_text(
-            record["note_text"],
-            final_dx
-        )
+        retrieval_text = self.build_retrieval_text(record["note_text"], final_dx)
 
         return {
             "retrieval_text": retrieval_text,
+            "subject_id": record["subject_id"],    # fixes case-unknown-unknown
+            "hadm_id": record["hadm_id"],          # fixes case-unknown-unknown
             "final_diagnosis": final_dx,
             "model_diagnosis": record["model_diagnosis"],
             "correct": record["human_correct"],
-            "failure_mode": record["error_type"],
-            "doctor_confidence": record["human_confidence"],
-            "model_confidence": record["model_confidence"],
+            "failure_mode": record.get("human_failure_mode"),
+            "doctor_confidence": record.get("human_confidence"),
+            "model_confidence": record.get("model_confidence"),
             "note_text": record["note_text"],
         }
