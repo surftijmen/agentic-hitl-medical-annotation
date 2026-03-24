@@ -55,7 +55,8 @@ class PromptAgent:
                 continue
 
             mode = fb.get("failure_mode")
-            if not mode:
+            if not mode or mode == "ambiguous_case":
+                # ambiguous_case = data quality issue, not a prompt bug → skip
                 continue
 
             if mode not in agg:

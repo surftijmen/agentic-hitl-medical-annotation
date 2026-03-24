@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 from collections import Counter
@@ -21,10 +22,59 @@ class TechniqueConfig:
     """
     use_rag: bool = False
     use_self_consistency: bool = False
-    n_consistency_samples: int = 5
+    n_consistency_samples: int = 3
     consistency_temperature: float = 0.7
     use_prompt_patching: bool = False      # applied between runs in main.py
     use_feedback_routing: bool = False     # route failures to rag vs prompt_patch
+    chain_of_thoughts: bool = False        # ask model to reason step-by-step before output
+    use_few_shot: bool = False             # inject static few-shot examples into the prompt
+
+
+# ── Static few-shot examples ─────────────────────────────────────────────────
+# These are fictional but medically realistic examples.
+# They show the model exactly what a correct extraction looks like across three
+# representative cases: confirmed positive, confirmed none, and synonym mapping.
+
+FEW_SHOT_EXAMPLES = [
+    (
+        "Patient is a 72-year-old male admitted for acute decompensated congestive "
+        "heart failure. Echocardiogram confirms EF of 30%. History of CHF.",
+        '{"diagnosis": "CHF", "is_diagnosis_given": 1, "confidence_level": 97}',
+    ),
+    (
+        "Patient presents with dyspnea and productive cough. Rule out pneumonia. "
+        "Chest X-ray inconclusive. No confirmed diagnosis at this time.",
+        '{"diagnosis": "none", "is_diagnosis_given": 0, "confidence_level": 91}',
+    ),
+    (
+        "68-year-old female with well-controlled type 2 diabetes mellitus on "
+        "metformin. HbA1c 7.2%. Admitted for elective knee replacement.",
+        '{"diagnosis": "Diabetes", "is_diagnosis_given": 1, "confidence_level": 99}',
+    ),
+]
+
+# ── CoT format instruction override ──────────────────────────────────────────
+# Replaces the default format_instruction when chain_of_thoughts is active.
+# Reasoning is embedded as a field so the JSON parser never breaks.
+
+COT_FORMAT_INSTRUCTION = (
+    'Return ONLY valid JSON with exactly these fields: '
+    '{"reasoning": "your step-by-step thinking", '
+    '"diagnosis": "string or none", '
+    '"is_diagnosis_given": 0 or 1, '
+    '"confidence_level": integer from 0 to 100}. '
+    'Do not add, remove, or rename fields. Do not use markdown outside the JSON.'
+)
+
+COT_THINKING_PROMPT = (
+    "Before answering, reason step-by-step inside the 'reasoning' field:\n"
+    "  1. List every medical condition mentioned in the text.\n"
+    "  2. For each condition, decide if it is explicitly confirmed — not "
+    "'possible', 'suspected', 'rule out', or negated ('no evidence of').\n"
+    "  3. Map confirmed conditions to the allowed_diagnoses list "
+    "(use synonym mapping where needed).\n"
+    "  4. Select the most clinically relevant confirmed diagnosis, or 'none'."
+)
 
 
 # ================================================================
@@ -98,19 +148,40 @@ class Annotator:
         if self.prompt_dict.get("query"):
             parts.append(self.prompt_dict["query"])
 
+        allowed = self.prompt_dict.get("allowed_diagnoses")
+        if allowed:
+            parts.append(
+                "Allowed diagnoses (you MUST use one of these exact labels, or 'none'):\n"
+                + ", ".join(allowed)
+            )
+
         if self.prompt_dict.get("instructions"):
             parts.append("Instructions:")
             for inst in self.prompt_dict["instructions"]:
                 parts.append(f"- {inst}")
 
-        if examples:
-            parts.append(
-                "Here are some examples for text that do or do not contain "
-                "explicit disease diagnoses:"
-            )
-            parts.extend(examples)
+        # ── Few-shot examples ─────────────────────────────────────
+        # Priority: caller-supplied dynamic examples > static FEW_SHOT_EXAMPLES
+        active_examples = examples
+        if not active_examples and self.config.use_few_shot:
+            active_examples = [
+                f"Medical text: {text}\nOutput: {output}"
+                for text, output in FEW_SHOT_EXAMPLES
+            ]
 
-        if self.prompt_dict.get("format_instruction"):
+        if active_examples:
+            parts.append(
+                "Here are examples of correct extractions. "
+                "Follow the same reasoning and format:"
+            )
+            for ex in active_examples:
+                parts.append(ex)
+
+        # ── Chain-of-thought ──────────────────────────────────────
+        if self.config.chain_of_thoughts:
+            parts.append(COT_THINKING_PROMPT)
+            parts.append(COT_FORMAT_INSTRUCTION)
+        elif self.prompt_dict.get("format_instruction"):
             parts.append(self.prompt_dict["format_instruction"])
 
         if input_text:
@@ -151,12 +222,113 @@ class Annotator:
         text = re.sub(r"\s+", " ", text)
         return text.strip()
 
+    # ── Label normalization ──────────────────────────────────────
+    # Maps common model phrasings back to the canonical allowed-diagnosis labels.
+    # The model often returns "Myocardial Infarction" instead of "MI", etc.
+
+    _LABEL_SYNONYMS: Dict[str, str] = {
+        # MI
+        "myocardial infarction": "MI", "heart attack": "MI",
+        "stemi": "MI", "nstemi": "MI", "acute mi": "MI",
+        # CHF
+        "congestive heart failure": "CHF", "chf exacerbation": "CHF",
+        "heart failure": "CHF", "decompensated heart failure": "CHF",
+        "acute decompensated heart failure": "CHF",
+        # CAD
+        "coronary artery disease": "CAD",
+        # CKD
+        "chronic kidney disease": "CKD", "chronic renal failure": "CKD",
+        "end-stage renal disease": "CKD", "esrd": "CKD",
+        # Atrial Fibrillation
+        "atrial fibrillation": "Atrial Fibrillation",
+        "paroxysmal atrial fibrillation": "Atrial Fibrillation",
+        "afib": "Atrial Fibrillation", "af": "Atrial Fibrillation",
+        # Sepsis — bacteremia is a distinct diagnosis (bacteria in blood vs systemic
+        # inflammatory response), so it is intentionally excluded from this mapping.
+        "sepsis": "Sepsis", "septic shock": "Sepsis",
+        "severe sepsis": "Sepsis", "septicemia": "Sepsis",
+        # PE
+        "pulmonary embolism": "PE",
+        # DVT
+        "deep vein thrombosis": "DVT",
+        # UTI
+        "urinary tract infection": "UTI",
+        # HIV/AIDS
+        "aids": "HIV",
+        # Stroke
+        "cerebrovascular accident": "Stroke", "cva": "Stroke",
+        "ischemic stroke": "Stroke", "hemorrhagic stroke": "Stroke",
+        # Diabetes
+        "diabetes mellitus": "Diabetes", "type 2 diabetes": "Diabetes",
+        "type 1 diabetes": "Diabetes", "dm": "Diabetes",
+        # Hypertension
+        "high blood pressure": "Hypertension", "htn": "Hypertension",
+        # COPD
+        "chronic obstructive pulmonary disease": "COPD",
+        "copd exacerbation": "COPD",
+        # Cancer
+        "carcinoma": "Cancer", "malignancy": "Cancer",
+        "neoplasm": "Cancer", "tumor": "Cancer", "lymphoma": "Cancer",
+        "leukemia": "Cancer", "metastatic cancer": "Cancer",
+    }
+
+    def _normalize_diagnosis(self, raw: str) -> str:
+        """Map model output to a canonical allowed-diagnosis label."""
+        if not raw or raw.lower().strip() == "none":
+            return "none"
+        key = raw.lower().strip()
+        # Exact synonym match
+        if key in self._LABEL_SYNONYMS:
+            return self._LABEL_SYNONYMS[key]
+        # Substring match (e.g. "Metastatic renal cell carcinoma" → Cancer)
+        for synonym, label in self._LABEL_SYNONYMS.items():
+            if synonym in key:
+                return label
+        # Already a canonical label (case-insensitive check)
+        canonical = {d.lower(): d for d in [
+            "Hypertension", "Diabetes", "COPD", "CHF", "Pneumonia", "Sepsis",
+            "Atrial Fibrillation", "CAD", "CKD", "Asthma", "Cancer", "Stroke",
+            "MI", "Tuberculosis", "Anemia", "Cirrhosis", "HIV", "Obesity",
+            "UTI", "DVT", "PE",
+        ]}
+        if key in canonical:
+            return canonical[key]
+        return raw  # unknown — return as-is so the judge can flag it
+
     # ── Output parsing ───────────────────────────────────────────
 
     def extract_results(self, llm_output: str) -> Dict:
-        match = re.search(r"\{.*\}", llm_output, re.DOTALL)
+        if not llm_output:
+            return {
+                "diagnosis": "none",
+                "is_diagnosis_given": 0,
+                "confidence_level": 0,
+                "error": "Empty response from model (possible safety filter)",
+                "raw_output": "",
+            }
 
-        if not match:
+        # Strip markdown code fences the model may wrap its output in
+        cleaned = re.sub(r"```(?:json)?", "", llm_output).strip()
+
+        data = None
+
+        # 1. Direct parse
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        # 2. Find first '{' and decode exactly one JSON object from that position
+        if data is None:
+            start = cleaned.find("{")
+            if start != -1:
+                decoder = json.JSONDecoder()
+                try:
+                    data, _ = decoder.raw_decode(cleaned, start)
+                except json.JSONDecodeError:
+                    pass
+
+        if data is None:
             return {
                 "diagnosis": "none",
                 "is_diagnosis_given": 0,
@@ -165,17 +337,8 @@ class Annotator:
                 "raw_output": llm_output,
             }
 
-        try:
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError as e:
-            return {
-                "diagnosis": "none",
-                "is_diagnosis_given": 0,
-                "confidence_level": 0,
-                "error": str(e),
-                "raw_output": llm_output,
-            }
-
+        # Normalize diagnosis to canonical label before returning
+        data["diagnosis"] = self._normalize_diagnosis(data.get("diagnosis", "none"))
         data["raw_output"] = llm_output
         return data
 
@@ -189,14 +352,24 @@ class Annotator:
             tools=[self.rag.get_tool()] if self.config.use_rag and self.rag else [],
         )
 
-    def _call_model(self, user_prompt: str, temperature: float = 0.0) -> str:
+    def _call_model(self, user_prompt: str, temperature: float = 0.0):
         config = self._build_config(temperature)
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=user_prompt,
-            config=config,
-        )
-        return response
+        max_retries = 4
+        for attempt in range(max_retries):
+            try:
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=user_prompt,
+                    config=config,
+                )
+            except Exception as e:
+                err = str(e)
+                if ("503" in err or "429" in err or "UNAVAILABLE" in err) and attempt < max_retries - 1:
+                    wait = 5 * (attempt + 1)
+                    print(f" [retry {attempt+1}/{max_retries-1}, {wait}s]", end="", flush=True)
+                    time.sleep(wait)
+                else:
+                    raise
 
     def _log_rag_grounding(self, response):
         grounding_count = 0
@@ -218,7 +391,12 @@ class Annotator:
         if self.config.use_rag:
             self._log_rag_grounding(response)
 
-        return self.extract_results(response.text)
+        result = self.extract_results(response.text)
+
+        if self.config.chain_of_thoughts and self.debug and "reasoning" in result:
+            print(f"    CoT reasoning: {result['reasoning'][:300]}...")
+
+        return result
 
     # ── Self-consistency ─────────────────────────────────────────
 
@@ -267,6 +445,12 @@ class Annotator:
     def analyze_medical_text(self, medical_text: str) -> Dict:
         """
         Route to the appropriate inference strategy based on TechniqueConfig.
+
+        Technique combinations handled:
+          - self_consistency alone or combined with CoT/few-shot:
+            build_user_prompt already embeds CoT/few-shot instructions,
+            so each consistency sample automatically uses them.
+          - single inference: direct call with whatever prompt is built.
         """
         if self.config.use_self_consistency:
             return self.analyze_with_consistency(medical_text)
