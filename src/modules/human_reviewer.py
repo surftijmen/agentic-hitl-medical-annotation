@@ -307,7 +307,7 @@ class HumanReviewer:
         self,
         annotation: Dict,
         medical_note: str,
-        gold: Optional[str] = None,
+        gold=None,
         case_num: int = None,
         total_cases: int = None,
     ) -> Dict:
@@ -361,9 +361,16 @@ class HumanReviewer:
         else:
             self.cot_label.config(text="")
 
-        self.gold_label.config(
-            text=f"Gold reference: {gold}" if gold else ""
-        )
+        if isinstance(gold, dict):
+            gold_text = (
+                f"Gold reference: {gold.get('long_title', '')} "
+                f"(ICD-9 {gold.get('icd9_code', '?')})"
+            )
+        elif gold:
+            gold_text = f"Gold reference: {gold}"
+        else:
+            gold_text = ""
+        self.gold_label.config(text=gold_text)
 
         self.root.mainloop()
         self.root.update()

@@ -15,22 +15,14 @@ Why this is valid for research:
 """
 
 import json
+import random
 import re
 import time
 import toml
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from google import genai
 from google.genai import types
 
-
-# Diagnoses the annotator is allowed to return — the judge needs this to
-# understand what valid synonym mappings look like.
-ALLOWED_DIAGNOSES = [
-    "Hypertension", "Diabetes", "COPD", "CHF", "Pneumonia", "Sepsis",
-    "Atrial Fibrillation", "CAD", "CKD", "Asthma", "Cancer", "Stroke",
-    "MI", "Tuberculosis", "Anemia", "Cirrhosis", "HIV", "Obesity",
-    "UTI", "DVT", "PE",
-]
 
 FAILURE_MODES = [
     "hallucination",
@@ -41,57 +33,121 @@ FAILURE_MODES = [
     "ambiguous_case",
 ]
 
+
+# Gemini response schema — forces structured output so malformed JSON is
+# impossible and the regex fallback in _parse_judgment is never needed.
+# `failure_mode` is omitted from `required` because it should be null when
+# the verdict is correct; the prompt still tells the model to fill it when
+# the verdict is incorrect.
+_JUDGMENT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "correct": {"type": "BOOLEAN"},
+        "failure_mode": {
+            "type": "STRING",
+            "enum": FAILURE_MODES + ["none"],
+        },
+        "comment": {"type": "STRING"},
+        "confidence": {"type": "INTEGER"},
+    },
+    "required": ["correct", "comment", "confidence", "failure_mode"],
+    "propertyOrdering": ["correct", "failure_mode", "comment", "confidence"],
+}
+
 _SYSTEM_PROMPT = """\
-You are a senior clinician evaluating a medical text annotation system.
-Your task: decide if the annotator's extracted diagnosis is CORRECT or INCORRECT.
+You are a senior clinician evaluating an LLM medical-text annotation system.
+Your task: decide whether the annotator's extracted diagnosis is semantically
+consistent with the billed PRIMARY ICD-9 diagnosis for this admission.
 
-━━━ WHAT THE ANNOTATOR MUST DO ━━━
-1. Extract ONLY diagnoses that are explicitly confirmed in the note.
-   (Skip suspected, possible, rule-out, or negated findings.)
-2. Map synonyms/abbreviations to the allowed list:
-   heart attack → MI | AIDS → HIV | type 2 DM / diabetes mellitus → Diabetes
-   end-stage heart failure / congestive heart failure / CHF → CHF
-   COPD exacerbation → COPD | acute MI / STEMI / NSTEMI → MI
-   pulmonary embolism → PE | deep vein thrombosis → DVT
-   urinary tract infection → UTI | atrial fibrillation / AF / AFib → Atrial Fibrillation
-   end-stage renal disease / ESRD / chronic renal failure → CKD (ESRD is stage 5 CKD — same condition)
-3. Return "none" if no confirmed diagnosis from the list is present.
-4. Return the single most clinically primary confirmed diagnosis.
+━━━ INPUTS YOU WILL RECEIVE ━━━
+• MEDICAL NOTE — the (possibly redacted) discharge summary the annotator saw.
+• ANNOTATOR OUTPUT — a JSON with the annotator's free-text `diagnosis`,
+  plus `confidence_level` and (optionally) chain-of-thought `reasoning`.
+• GOLD PRIMARY ICD-9 — the single billed primary diagnosis for this
+  admission, shown as an ICD-9 code together with its SHORT_TITLE and
+  LONG_TITLE (the human-readable description). Use the LONG_TITLE as the
+  primary signal; SHORT_TITLE is a disambiguation hint.
 
-━━━ ALLOWED DIAGNOSES (the only valid outputs) ━━━
-{allowed_diagnoses}
+━━━ WHAT COUNTS AS CORRECT ━━━
+The annotator's `diagnosis` is CORRECT when it refers to the SAME clinical
+concept as the gold ICD-9 LONG_TITLE, given what the note says. Concretely:
+• Accept standard synonyms and abbreviations
+  (e.g. "MI" ≈ "Acute myocardial infarction of other anterior wall";
+        "CHF" ≈ "Congestive heart failure, unspecified";
+        "UTI" ≈ "Urinary tract infection, site not specified";
+        "AKI" ≈ "Acute kidney failure, unspecified";
+        "ESRD" ≈ "End stage renal disease";
+        "ICH" / "SAH" / "SDH" ≈ any intracranial hemorrhage code).
+• Accept a MORE-SPECIFIC annotator answer that is a strict subtype of the
+  ICD concept (e.g. "STEMI" when gold is "Acute myocardial infarction,
+  unspecified"; "Paroxysmal atrial fibrillation" when gold is "Atrial
+  fibrillation"; "Septic shock" when gold is "Severe sepsis").
+• Accept a MORE-GENERAL annotator answer only when the gold is a specific
+  instance of the general concept AND the note does not contradict it
+  (e.g. annotator: "Pneumonia", gold: "Pneumonia, organism unspecified").
+• Accept the primary CAUSE when the ICD is a direct complication
+  (e.g. annotator: "MI", gold: "Cardiogenic shock" following acute MI
+  that the note clearly describes).
+
+━━━ WHAT COUNTS AS INCORRECT ━━━
+• A different organ system or clinically distinct condition
+  (e.g. annotator: "Pneumonia", gold: "Acute kidney failure"), even if the
+  note mentions both — primary means primary.
+• A symptom or sign instead of a disease
+  (e.g. annotator: "Chest pain", gold: "Acute MI"; annotator: "Hypoxia",
+  gold: "Pneumonia").
+• A diagnosis that the note does not support at all (hallucination), even
+  if it happens to be close to the gold title.
+• An unsupported inference from ambiguous findings
+  (e.g. annotator: "Sepsis" when note only says "presumed infection,
+  started empiric antibiotics" with no confirmed sepsis).
+
+━━━ AUTHORITY OF THE GOLD LABEL ━━━
+Gold is the billed primary ICD-9 diagnosis — strong evidence, but not
+absolute truth. Always cross-check against what is EXPLICITLY written in
+the note. If the note clearly contradicts the gold (rare but possible),
+trust the note and mark the annotator correct/incorrect accordingly —
+flag this in `comment`.
 
 ━━━ FAILURE MODE GUIDE (pick the MOST SPECIFIC one) ━━━
 • hallucination              — diagnosis is not supported by anything in the note
-• missed_entity              — a clearly confirmed diagnosis was ignored (annotator said "none" or picked wrong one)
-• terminology_gap            — correct concept but wrong label (not mapped to allowed list, e.g. "End-Stage Heart Failure" instead of "CHF")
+• missed_entity              — a clearly confirmed diagnosis was ignored (annotator said "none" or picked something else while the correct concept is plainly stated)
+• terminology_gap            — correct concept, wrong or non-clinical terminology that obscures the match
 • unsupported_inference      — annotator inferred/assumed a diagnosis not explicitly stated
 • symptom_diagnosis_confusion — annotator returned a symptom or sign, not a diagnosis
-• ambiguous_case             — ONLY use this if it is genuinely impossible to judge (e.g. note is too short/corrupted)
-
-━━━ LABEL MATCHING — BE LENIENT ━━━
-When comparing the annotator's label to the allowed list, accept reasonable near-matches:
-• "Metastatic renal cell carcinoma" ≈ "Cancer" → CORRECT (same concept)
-• "Septic shock" ≈ "Sepsis" → CORRECT (sub-type of the allowed label)
-• "End-Stage Renal Disease" ≈ "CKD" → CORRECT (ESRD is stage 5 CKD — same disease)
-• "Paroxysmal atrial fibrillation" ≈ "Atrial Fibrillation" → CORRECT (sub-type)
-Do NOT penalise minor wording differences if the clinical concept is clearly the same.
-
-━━━ GOLD STANDARD NOTE ━━━
-The gold label is a reference from MIMIC-III, not absolute truth.
-Judge by what is EXPLICITLY written in the note text.
+• ambiguous_case             — ONLY when it is genuinely impossible to judge (note too short/corrupted; gold title is too vague such as "Other specified disorder")
 
 ━━━ OUTPUT FORMAT ━━━
-You MUST respond with ONLY a JSON object — no prose, no markdown, no explanation outside the JSON.
-{{
-  "correct": true or false,
-  "failure_mode": "hallucination" | "missed_entity" | "terminology_gap" | "unsupported_inference" | "symptom_diagnosis_confusion" | "ambiguous_case" | null,
-  "comment": "one sentence explaining your verdict",
-  "confidence": <integer 0-100>
-}}
-""".format(
-    allowed_diagnoses=", ".join(ALLOWED_DIAGNOSES),
-)
+Respond with ONLY a JSON object matching the enforced schema — no prose, no markdown.
+Fields:
+  "correct"       — boolean.
+  "failure_mode"  — one of: "hallucination", "missed_entity", "terminology_gap",
+                    "unsupported_inference", "symptom_diagnosis_confusion",
+                    "ambiguous_case", or "none" if correct=true.
+  "comment"       — one sentence explaining the verdict.
+  "confidence"    — integer 0-100.
+"""
+
+
+def _format_gold(gold: Any) -> str:
+    """Render the gold label section of the judge prompt.
+
+    Accepts either a dict {icd9_code, short_title, long_title} (the current
+    pipeline shape) or a bare string (defensive fallback for old callers).
+    """
+    if gold is None:
+        return "GOLD PRIMARY ICD-9 DIAGNOSIS: not available"
+    if isinstance(gold, dict):
+        icd   = gold.get("icd9_code", "?")
+        short = gold.get("short_title", "")
+        long_ = gold.get("long_title", "")
+        return (
+            "GOLD PRIMARY ICD-9 DIAGNOSIS (billed, MIMIC-III):\n"
+            f"  code:        {icd}\n"
+            f"  long_title:  {long_}\n"
+            f"  short_title: {short}"
+        )
+    return f"GOLD PRIMARY ICD-9 DIAGNOSIS: {gold}"
 
 
 class AutoReviewer:
@@ -123,7 +179,7 @@ class AutoReviewer:
         self,
         annotation: Dict,
         medical_note: str,
-        gold: Optional[str] = None,
+        gold: Optional[Any] = None,
         case_num: int = None,
         total_cases: int = None,
     ) -> Dict:
@@ -136,7 +192,7 @@ class AutoReviewer:
         if case_num and total_cases and self.verbose:
             print(f"    Judge [{case_num}/{total_cases}] calling {self.judge_model}...", end=" ", flush=True)
 
-        max_retries = 3
+        max_retries = 6
         for attempt in range(max_retries):
             try:
                 response = self.client.models.generate_content(
@@ -146,6 +202,8 @@ class AutoReviewer:
                         system_instruction=_SYSTEM_PROMPT,
                         temperature=0.0,       # deterministic judgment
                         max_output_tokens=1024,
+                        response_mime_type="application/json",
+                        response_schema=_JUDGMENT_SCHEMA,
                     ),
                 )
                 break  # success
@@ -153,9 +211,14 @@ class AutoReviewer:
                 err_str = str(e)
                 is_transient = "503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str
                 if is_transient and attempt < max_retries - 1:
-                    wait = 5 * (attempt + 1)
+                    # Parse suggested retry delay from the API response if present,
+                    # otherwise use exponential backoff. Always add jitter so threads
+                    # that hit the rate limit together don't all retry simultaneously.
+                    suggested = re.search(r"retry[^\d]*(\d+(?:\.\d+)?)s", err_str)
+                    base_wait = float(suggested.group(1)) if suggested else 10 * (2 ** attempt)
+                    wait = base_wait + random.uniform(1, 5)
                     if self.verbose:
-                        print(f"\n    [retry {attempt+1}/{max_retries-1}] transient error, waiting {wait}s...", flush=True)
+                        print(f"\n    [retry {attempt+1}/{max_retries-1}] rate limit, waiting {wait:.1f}s...", flush=True)
                     time.sleep(wait)
                 else:
                     raise RuntimeError(
@@ -188,11 +251,11 @@ class AutoReviewer:
         self,
         annotation: Dict,
         medical_note: str,
-        gold: Optional[str],
+        gold: Optional[Any],
     ) -> str:
         parts = []
 
-        parts.append(f"MEDICAL NOTE:\n{medical_note[:3000]}")  # cap at 3k chars
+        parts.append(f"MEDICAL NOTE:\n{medical_note}")
 
         ann_summary = {
             "diagnosis": annotation.get("diagnosis"),
@@ -205,10 +268,7 @@ class AutoReviewer:
 
         parts.append(f"ANNOTATOR OUTPUT:\n{json.dumps(ann_summary, indent=2)}")
 
-        if gold:
-            parts.append(f"GOLD REFERENCE DIAGNOSIS (MIMIC-III): {gold}")
-        else:
-            parts.append("GOLD REFERENCE DIAGNOSIS: not available")
+        parts.append(_format_gold(gold))
 
         return "\n\n".join(parts)
 
@@ -278,10 +338,14 @@ class AutoReviewer:
                 "confidence": 0,
             }
 
-        # Validate failure_mode
-        if data.get("failure_mode") not in FAILURE_MODES + [None]:
+        # Normalise failure_mode: schema allows "none" string when correct=true;
+        # downstream code expects None.
+        fm = data.get("failure_mode")
+        if fm == "none" or (data.get("correct") is True and fm in (None, "none")):
+            data["failure_mode"] = None
+        elif fm not in FAILURE_MODES + [None]:
             if self.verbose:
-                print(f"\n    [WARN] Unknown failure_mode '{data.get('failure_mode')}' — normalising to ambiguous_case")
+                print(f"\n    [WARN] Unknown failure_mode '{fm}' — normalising to ambiguous_case")
             data["failure_mode"] = "ambiguous_case"
 
         return data

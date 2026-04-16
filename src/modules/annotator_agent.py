@@ -35,21 +35,49 @@ class TechniqueConfig:
 # They show the model exactly what a correct extraction looks like across three
 # representative cases: confirmed positive, confirmed none, and synonym mapping.
 
-FEW_SHOT_EXAMPLES = [
+# Each example is (medical_text, output_without_cot, output_with_cot).
+# When CoT is active the model requires a "reasoning" field — using the same
+# examples without it causes format conflicts that produce hallucinations.
+FEW_SHOT_EXAMPLES: list[tuple[str, str, str]] = [
+    # ── Positive: simple explicit confirmation ──────────────────────────────
     (
         "Patient is a 72-year-old male admitted for acute decompensated congestive "
         "heart failure. Echocardiogram confirms EF of 30%. History of CHF.",
         '{"diagnosis": "CHF", "is_diagnosis_given": 1, "confidence_level": 97}',
+        '{"reasoning": "1. Conditions: CHF. 2. CHF is explicitly confirmed (\'acute decompensated congestive heart failure\', EF 30%). 3. Maps to CHF. 4. CHF is the primary confirmed diagnosis.", "diagnosis": "CHF", "is_diagnosis_given": 1, "confidence_level": 97}',
     ),
+    # ── Negative: rule-out / not yet confirmed ──────────────────────────────
     (
         "Patient presents with dyspnea and productive cough. Rule out pneumonia. "
-        "Chest X-ray inconclusive. No confirmed diagnosis at this time.",
-        '{"diagnosis": "none", "is_diagnosis_given": 0, "confidence_level": 91}',
+        "Chest X-ray inconclusive. No confirmed diagnosis documented.",
+        '{"diagnosis": "none", "is_diagnosis_given": 0, "confidence_level": 95}',
+        '{"reasoning": "1. Conditions: pneumonia (rule out). 2. Pneumonia is NOT confirmed — explicitly stated as rule-out and CXR inconclusive. 3. No confirmed condition maps to the allowed list. 4. Return none.", "diagnosis": "none", "is_diagnosis_given": 0, "confidence_level": 95}',
     ),
+    # ── Hard negative: clinical indicators present but diagnosis word absent ─
     (
-        "68-year-old female with well-controlled type 2 diabetes mellitus on "
-        "metformin. HbA1c 7.2%. Admitted for elective knee replacement.",
-        '{"diagnosis": "Diabetes", "is_diagnosis_given": 1, "confidence_level": 99}',
+        "67-year-old female brought in by EMS with fever to 104°F, HR 168, "
+        "hypotension (BP 82/50), and altered mental status. WBC 22k. Blood "
+        "cultures drawn. Started on broad-spectrum antibiotics empirically for "
+        "presumed infection. ICU admission for hemodynamic monitoring.",
+        '{"diagnosis": "none", "is_diagnosis_given": 0, "confidence_level": 90}',
+        '{"reasoning": "1. Conditions mentioned: fever, tachycardia, hypotension, altered mental status, elevated WBC — signs of infection. 2. The word \'sepsis\' never appears. \'Presumed infection\' is not a confirmed diagnosis. I must not infer Sepsis from symptoms alone. 3. No allowed diagnosis is explicitly confirmed. 4. Return none.", "diagnosis": "none", "is_diagnosis_given": 0, "confidence_level": 90}',
+    ),
+    # ── Positive: same presentation but diagnosis explicitly named ──────────
+    (
+        "55-year-old male admitted to the ICU with sepsis secondary to a urinary "
+        "source. Blood cultures grew E. coli. Treated for septic shock with "
+        "vasopressors and IV antibiotics.",
+        '{"diagnosis": "Sepsis", "is_diagnosis_given": 1, "confidence_level": 99}',
+        '{"reasoning": "1. Conditions: sepsis (explicitly stated), septic shock (sub-type). 2. Sepsis is explicitly confirmed: \'admitted to the ICU with sepsis\'. 3. Maps directly to Sepsis. 4. Sepsis is the primary diagnosis.", "diagnosis": "Sepsis", "is_diagnosis_given": 1, "confidence_level": 99}',
+    ),
+    # ── Hard positive: multiple confirmed comorbidities — pick primary ───────
+    (
+        "78-year-old male with known CAD, CHF (EF 35%), and CKD stage 3 presents "
+        "with crushing chest pain. EKG shows ST-elevation in leads II, III, aVF. "
+        "Troponin peaked at 45. Emergent cardiac catheterization confirmed acute "
+        "inferior ST-elevation myocardial infarction. PCI with stent to RCA performed.",
+        '{"diagnosis": "MI", "is_diagnosis_given": 1, "confidence_level": 100}',
+        '{"reasoning": "1. Conditions: CAD (history), CHF (history), CKD (history), MI (acute, confirmed). 2. All four are confirmed, but CAD/CHF/CKD are prior history. MI is the acute admission diagnosis — \'confirmed acute inferior ST-elevation myocardial infarction\'. 3. MI maps to MI. 4. MI is the most clinically primary confirmed diagnosis.", "diagnosis": "MI", "is_diagnosis_given": 1, "confidence_level": 100}',
     ),
 ]
 
@@ -73,7 +101,9 @@ COT_THINKING_PROMPT = (
     "'possible', 'suspected', 'rule out', or negated ('no evidence of').\n"
     "  3. Map confirmed conditions to the allowed_diagnoses list "
     "(use synonym mapping where needed).\n"
-    "  4. Select the most clinically relevant confirmed diagnosis, or 'none'."
+    "  4. Select the most clinically relevant confirmed diagnosis, or 'none'.\n"
+    "CRITICAL: Only reference words and phrases that literally appear in the text. "
+    "Do NOT invent section names, quotes, or content that is not present."
 )
 
 
@@ -85,8 +115,8 @@ class Annotator:
     def __init__(
         self,
         model_name: str = "gemini-2.5-flash",
-        mimic_notes_path: str = "data/mimiciii_notes.parquet",
-        mimic_adm_path: str = "data/mimiciii_patients_admissions.parquet",
+        mimic_notes_path: str = "data/new/processed/notes_with_gold.parquet",
+        mimic_adm_path: Optional[str] = None,  # legacy, unused with the new processed parquet
         prompt_path: str = "logs/prompts/v1_initial.json",
         secrets_path: str = "./secrets.toml",
         debug: bool = False,
@@ -162,11 +192,15 @@ class Annotator:
 
         # ── Few-shot examples ─────────────────────────────────────
         # Priority: caller-supplied dynamic examples > static FEW_SHOT_EXAMPLES
+        # When CoT is active, use the CoT-formatted output (index 2) so the
+        # examples match the required format — mismatched formats cause the
+        # model to hallucinate or produce unparseable output.
         active_examples = examples
         if not active_examples and self.config.use_few_shot:
+            output_idx = 2 if self.config.chain_of_thoughts else 1
             active_examples = [
-                f"Medical text: {text}\nOutput: {output}"
-                for text, output in FEW_SHOT_EXAMPLES
+                f"Medical text: {ex[0]}\nOutput: {ex[output_idx]}"
+                for ex in FEW_SHOT_EXAMPLES
             ]
 
         if active_examples:
@@ -222,78 +256,62 @@ class Annotator:
         text = re.sub(r"\s+", " ", text)
         return text.strip()
 
-    # ── Label normalization ──────────────────────────────────────
-    # Maps common model phrasings back to the canonical allowed-diagnosis labels.
-    # The model often returns "Myocardial Infarction" instead of "MI", etc.
+    @staticmethod
+    def redact_discharge_section(text: str) -> str:
+        """Remove only the sections that directly state the discharge diagnosis.
 
-    _LABEL_SYNONYMS: Dict[str, str] = {
-        # MI
-        "myocardial infarction": "MI", "heart attack": "MI",
-        "stemi": "MI", "nstemi": "MI", "acute mi": "MI",
-        # CHF
-        "congestive heart failure": "CHF", "chf exacerbation": "CHF",
-        "heart failure": "CHF", "decompensated heart failure": "CHF",
-        "acute decompensated heart failure": "CHF",
-        # CAD
-        "coronary artery disease": "CAD",
-        # CKD
-        "chronic kidney disease": "CKD", "chronic renal failure": "CKD",
-        "end-stage renal disease": "CKD", "esrd": "CKD",
-        # Atrial Fibrillation
-        "atrial fibrillation": "Atrial Fibrillation",
-        "paroxysmal atrial fibrillation": "Atrial Fibrillation",
-        "afib": "Atrial Fibrillation", "af": "Atrial Fibrillation",
-        # Sepsis — bacteremia is a distinct diagnosis (bacteria in blood vs systemic
-        # inflammatory response), so it is intentionally excluded from this mapping.
-        "sepsis": "Sepsis", "septic shock": "Sepsis",
-        "severe sepsis": "Sepsis", "septicemia": "Sepsis",
-        # PE
-        "pulmonary embolism": "PE",
-        # DVT
-        "deep vein thrombosis": "DVT",
-        # UTI
-        "urinary tract infection": "UTI",
-        # HIV/AIDS
-        "aids": "HIV",
-        # Stroke
-        "cerebrovascular accident": "Stroke", "cva": "Stroke",
-        "ischemic stroke": "Stroke", "hemorrhagic stroke": "Stroke",
-        # Diabetes
-        "diabetes mellitus": "Diabetes", "type 2 diabetes": "Diabetes",
-        "type 1 diabetes": "Diabetes", "dm": "Diabetes",
-        # Hypertension
-        "high blood pressure": "Hypertension", "htn": "Hypertension",
-        # COPD
-        "chronic obstructive pulmonary disease": "COPD",
-        "copd exacerbation": "COPD",
-        # Cancer
-        "carcinoma": "Cancer", "malignancy": "Cancer",
-        "neoplasm": "Cancer", "tumor": "Cancer", "lymphoma": "Cancer",
-        "leukemia": "Cancer", "metastatic cancer": "Cancer",
-    }
+        Keeps the full clinical narrative (HPI, hospital course, medications,
+        labs, etc.) so the model has enough context to reason about the diagnosis,
+        but strips the sections that simply list the answer as a labelled output:
+          - DISCHARGE DIAGNOSES / DISCHARGE DIAGNOSIS
+          - FINAL DIAGNOSIS / PRINCIPAL DIAGNOSIS / PRIMARY DIAGNOSIS
+          - DISCHARGE CONDITION (often restates the diagnosis)
+          - DISCHARGE MEDICATIONS (lists drugs by diagnosis, gives it away)
+          - DISCHARGE INSTRUCTIONS / FOLLOW-UP (post-discharge, not clinical)
 
-    def _normalize_diagnosis(self, raw: str) -> str:
-        """Map model output to a canonical allowed-diagnosis label."""
-        if not raw or raw.lower().strip() == "none":
-            return "none"
-        key = raw.lower().strip()
-        # Exact synonym match
-        if key in self._LABEL_SYNONYMS:
-            return self._LABEL_SYNONYMS[key]
-        # Substring match (e.g. "Metastatic renal cell carcinoma" → Cancer)
-        for synonym, label in self._LABEL_SYNONYMS.items():
-            if synonym in key:
-                return label
-        # Already a canonical label (case-insensitive check)
-        canonical = {d.lower(): d for d in [
-            "Hypertension", "Diabetes", "COPD", "CHF", "Pneumonia", "Sepsis",
-            "Atrial Fibrillation", "CAD", "CKD", "Asthma", "Cancer", "Stroke",
-            "MI", "Tuberculosis", "Anemia", "Cirrhosis", "HIV", "Obesity",
-            "UTI", "DVT", "PE",
-        ]}
-        if key in canonical:
-            return canonical[key]
-        return raw  # unknown — return as-is so the judge can flag it
+        Falls back to the original text if nothing is redacted.
+        """
+        # Normalise multi-space headers
+        text = re.sub(r"([A-Z])\s{2,}([A-Z])", r"\1 \2", text)
+        text = re.sub(r"([A-Z])\s{2,}([A-Z])", r"\1 \2", text)
+
+        _HEADER = re.compile(r"(?<!\w)([A-Za-z][A-Za-z0-9 /\-]{2,}):")
+
+        # Sections to REMOVE — these directly reveal the discharge diagnosis
+        _DROP_NAMES = re.compile(
+            r"^(?:DISCHARGE\s+DIAGNOS(?:IS|ES)"
+            r"|FINAL\s+DIAGNOS(?:IS|ES)"
+            r"|PRINCIPAL\s+DIAGNOS(?:IS|ES)"
+            r"|PRIMARY\s+DIAGNOS(?:IS|ES)"
+            r"|DISCHARGE\s+CONDITION"
+            r"|CONDITION\s+(?:AT|ON)\s+DISCHARGE"
+            r"|DISCHARGE\s+MEDICATIONS?"
+            r"|MEDICATIONS?\s+ON\s+DISCHARGE"
+            r"|DISCHARGE\s+INSTRUCTIONS?(?:/FOLLOWUP)?"
+            r"|FOLLOWUP\s+INSTRUCTIONS?"
+            r"|FOLLOW[\s\-]?UP\s+(?:PLANS?|APPOINTMENTS?|INSTRUCTIONS?)"
+            r"|DISCHARGE\s+(?:STATUS|DISPOSITION)"
+            r")$",
+            re.I,
+        )
+
+        headers = list(_HEADER.finditer(text))
+        if not headers:
+            return text
+
+        kept_parts = [text[:headers[0].start()]]  # preamble
+
+        for idx, m in enumerate(headers):
+            header_name = m.group(1).strip()
+            start = m.start()
+            end = headers[idx + 1].start() if idx + 1 < len(headers) else len(text)
+            if not _DROP_NAMES.match(header_name):
+                kept_parts.append(text[start:end])
+
+        result = " ".join(kept_parts).strip()
+        if len(result) < 100:
+            return text  # fallback
+        return result
 
     # ── Output parsing ───────────────────────────────────────────
 
@@ -337,8 +355,13 @@ class Annotator:
                 "raw_output": llm_output,
             }
 
-        # Normalize diagnosis to canonical label before returning
-        data["diagnosis"] = self._normalize_diagnosis(data.get("diagnosis", "none"))
+        # Preserve the model's free-text diagnosis verbatim. The judge
+        # (AutoReviewer) compares it semantically against the ICD-9 LONG_TITLE
+        # — normalising to a canonical label here would destroy the detail
+        # the semantic judge uses.
+        raw_dx = data.get("diagnosis")
+        if not raw_dx or str(raw_dx).strip() == "":
+            data["diagnosis"] = "none"
         data["raw_output"] = llm_output
         return data
 
@@ -476,12 +499,12 @@ class Annotator:
 
             print("\n===== FINAL INFORMATION =====")
             print(f"Agents diagnosis: {result.get('diagnosis')}")
-            print("Actual diagnosis:", row["DIAGNOSIS"])
+            print(f"Actual diagnosis: {row['long_title']} (ICD-9 {row['icd9_code']})")
 
             if "error" in result:
                 self._log(f"Error: {result['error']}")
 
-        return (result.get("diagnosis"), row["DIAGNOSIS"])
+        return (result.get("diagnosis"), row["long_title"])
 
 
 if __name__ == "__main__":

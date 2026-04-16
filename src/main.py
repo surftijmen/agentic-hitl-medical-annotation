@@ -1,7 +1,9 @@
 import os
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import pandas as pd
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -47,6 +49,14 @@ EXPERIMENTS = {
     "cot_plus_few_shot": TechniqueConfig(chain_of_thoughts=True, use_few_shot=True),
     "rag_plus_cot": TechniqueConfig(use_rag=True, chain_of_thoughts=True),
 
+    # ── HITL learning curves (SubQ1: which feedback types matter?) ──
+    # Same as single-technique conditions but with HITL feedback loop enabled.
+    # Run multi-run to observe the learning trajectory per technique.
+    "baseline_hitl": TechniqueConfig(use_prompt_patching=True, use_feedback_routing=True),
+    "few_shot_hitl": TechniqueConfig(use_few_shot=True, use_prompt_patching=True, use_feedback_routing=True),
+    "cot_hitl": TechniqueConfig(chain_of_thoughts=True, use_prompt_patching=True, use_feedback_routing=True),
+    "cot_plus_few_shot_hitl": TechniqueConfig(chain_of_thoughts=True, use_few_shot=True, use_prompt_patching=True, use_feedback_routing=True),
+
     # ── Full pipeline (all techniques) ────────────────────────────
     "full_pipeline": TechniqueConfig(
         use_rag=True,
@@ -65,10 +75,14 @@ RAG_STORE_PATHS = {
     "consistency_only":    None,
     "cot_only":            None,
     "few_shot_only":       None,
-    "rag_plus_consistency":"logs/rag_stores/rag_plus_consistency.txt",
-    "cot_plus_few_shot":   None,
-    "rag_plus_cot":        "logs/rag_stores/rag_plus_cot.txt",
-    "full_pipeline":       "logs/rag_stores/full_pipeline.txt",
+    "rag_plus_consistency":     "logs/rag_stores/rag_plus_consistency.txt",
+    "cot_plus_few_shot":        None,
+    "rag_plus_cot":             "logs/rag_stores/rag_plus_cot.txt",
+    "baseline_hitl":            None,
+    "few_shot_hitl":            None,
+    "cot_hitl":                 None,
+    "cot_plus_few_shot_hitl":   None,
+    "full_pipeline":            "logs/rag_stores/full_pipeline.txt",
 }
 
 # Accumulated feedback signals persist across runs for prompt patching
@@ -183,6 +197,7 @@ def run_pipeline(
     reviewer_mode: str = "human",
     judge_model: str = "gemini-3-flash-preview",
     max_workers: int = 5,
+    sampler: Optional[DataSampler] = None,
 ):
     """
     Execute one full annotation pipeline run with human-in-the-loop review.
@@ -221,10 +236,8 @@ def run_pipeline(
 
     # ── 2. Data ──────────────────────────────────────────────────
     print("  [3/8] Loading medical data...", end=" ", flush=True)
-    sampler = DataSampler(
-        notes_path="data/mimiciii_notes.parquet",
-        adm_path="data/mimiciii_patients_admissions.parquet",
-    )
+    if sampler is None:
+        sampler = DataSampler()
     print("done")
 
     # ── 3. Annotator ─────────────────────────────────────────────
@@ -261,12 +274,13 @@ def run_pipeline(
 
     def _annotate(args):
         i, (_, row) = args
-        text = Annotator.clean_mimic_note(row["TEXT"])
+        text = Annotator.redact_discharge_section(row["TEXT"])
+        text = Annotator.clean_mimic_note(text)
         annotation = annotator.analyze_medical_text(text)
         return i, row, text, annotation
 
     _ann_results: Dict[int, tuple] = {}
-    with ThreadPoolExecutor(max_workers=sample_size) as pool:
+    with ThreadPoolExecutor(max_workers=min(sample_size, 20)) as pool:
         futures = {pool.submit(_annotate, item): item[0] for item in enumerate(rows, 1)}
         for f in as_completed(futures):
             i, row, text, annotation = f.result()
@@ -280,10 +294,13 @@ def run_pipeline(
         logger.log("SAMPLE_SELECTED", {
             "subject_id": row["SUBJECT_ID"],
             "hadm_id": row["HADM_ID"],
+            "icd9_code": row["icd9_code"],
+            "long_title": row["long_title"],
+            "icd9_chapter": row.get("icd9_chapter"),
         })
         logger.log("ANNOTATION_PRODUCED", {
             "diagnosis": annotation["diagnosis"],
-            "confidence": annotation["confidence_level"],
+            "confidence": annotation.get("confidence_level", 0),
             "consistency_score": annotation.get("consistency_score"),
             "has_cot_reasoning": "reasoning" in annotation,
         })
@@ -292,7 +309,7 @@ def run_pipeline(
             "hadm_id": row["HADM_ID"],
             "text": text,
             "annotation": annotation,
-            "gold": row["label"],
+            "gold": row["gold"],
         })
 
     print(f"  All {len(annotation_batch)} annotations generated")
@@ -319,9 +336,23 @@ def run_pipeline(
     n = len(annotation_batch)
 
     if reviewer_mode == "auto":
-        # Parallel auto-review — all judge API calls fire at once
+        # Rate limiter: enforces a minimum interval between API call starts so we
+        # stay under the judge model's quota (gemini-3.1-pro: 25 req/min → 1 per 2.5s).
+        # The lock is released before the actual API call so multiple calls can be
+        # in-flight simultaneously — new ones just can't START more than once per interval.
+        import time as _time
+        _rate_lock = threading.Lock()
+        _next_allowed: List[float] = [0.0]
+        _MIN_INTERVAL = 0.0 if sample_size <= 50 else 2.5  # no throttle for small batches
+
         def _review(args):
             i, item = args
+            with _rate_lock:
+                now = _time.time()
+                wait = _next_allowed[0] - now
+                if wait > 0:
+                    _time.sleep(wait)
+                _next_allowed[0] = _time.time() + _MIN_INTERVAL
             fb = reviewer.review(
                 annotation=item["annotation"],
                 medical_note=item["text"],
@@ -332,7 +363,7 @@ def run_pipeline(
             return i, item, fb
 
         _rev_results: Dict[int, tuple] = {}
-        with ThreadPoolExecutor(max_workers=n) as pool:
+        with ThreadPoolExecutor(max_workers=min(n, 20)) as pool:
             futures = {pool.submit(_review, (i, item)): i for i, item in enumerate(annotation_batch, 1)}
             for f in as_completed(futures):
                 i, item, fb = f.result()
@@ -340,7 +371,8 @@ def run_pipeline(
                 verdict = "✓" if fb.get("correct") else "✗"
                 print(f"  [{i}/{n}] Subject {item['subject_id']}: {verdict}", flush=True)
 
-        # Store and log in original order
+        # Store and log in original order; collect RAG records for batch upload
+        rag_batch = []
         for i in sorted(_rev_results):
             item, human_fb = _rev_results[i]
             logger.log("HUMAN_REVIEW", human_fb)
@@ -356,8 +388,11 @@ def run_pipeline(
             if rag is not None and config.use_rag:
                 rag_record = store.to_rag_record(store.records[-1])
                 if rag_record:
-                    rag.add_case(rag_record["retrieval_text"], rag_record)
+                    rag_batch.append((rag_record["retrieval_text"], rag_record))
             parsed_signals.append(parser.parse(human_fb))
+
+        if rag_batch:
+            rag.add_cases_parallel(rag_batch)
 
     else:
         # Human review — must stay sequential (interactive UI)
@@ -413,6 +448,10 @@ def run_pipeline(
     # ── Prompt patching (only if technique is active) ────────────
     proposal = None
     if config.use_prompt_patching:
+        # Accumulate signals for RAG routing reference, but only pass the
+        # CURRENT run's signals to the prompt patcher. Passing all historical
+        # signals causes old (already-fixed) failure modes to keep driving
+        # new patches, adding noise rather than signal.
         all_signals = load_accumulated_signals()
         all_signals.extend(parsed_signals)
         save_accumulated_signals(all_signals)
@@ -421,7 +460,7 @@ def run_pipeline(
         prompt_agent = PromptAgent()
         proposal = prompt_agent.propose_update(
             annotator.prompt_dict,
-            all_signals,
+            parsed_signals,   # current run only — not all_signals
             min_failures=2,
         )
         logger.log("PROMPT_PROPOSED", proposal)
@@ -491,6 +530,10 @@ def run_multi_pipeline(
 
     rag = load_or_create_rag(rag_store_path) if rag_store_path else None
 
+    # Single shared sampler across all runs — stratified batches ensure
+    # equal class representation and each run draws a fresh random sample.
+    shared_sampler = DataSampler()
+
     prompt_path = initial_prompt_path
     all_metrics = []
 
@@ -511,6 +554,7 @@ def run_multi_pipeline(
             run_number=run_num,
             reviewer_mode=reviewer_mode,
             judge_model=judge_model,
+            sampler=shared_sampler,
         )
 
         all_metrics.append({"run": run_num, **metrics})
@@ -518,7 +562,24 @@ def run_multi_pipeline(
         if run_num < num_runs and proposal:
             new_path = save_proposed_prompt(proposal, run_num, base_prompt_path=prompt_path)
             if new_path:
-                prompt_path = new_path
+                # ── Human approval of patch (fix #1) ──────────────────
+                print()
+                print("  Proposed prompt patch:")
+                try:
+                    import json as _json
+                    with open(new_path) as _f:
+                        _new = _json.load(_f)
+                    for instr in _new.get("instructions", []):
+                        if instr not in (df.get("instructions", []) if isinstance(df, dict) else []):
+                            print(f"    + {instr}")
+                except Exception:
+                    print(f"    (see {new_path})")
+                approve = input("  Apply this patch to the next run? [y/n, default y]: ").strip().lower()
+                if approve in ("", "y"):
+                    prompt_path = new_path
+                    print(f"  Patch applied: {prompt_path}")
+                else:
+                    print(f"  Patch rejected — keeping: {prompt_path}")
             else:
                 print(f"  Keeping current prompt: {prompt_path}")
 
@@ -563,6 +624,8 @@ def run_longitudinal_study(
     print(f"LONGITUDINAL STUDY  ({len(to_run)} conditions × {num_runs} runs × {sample_size} samples)")
     print("=" * 60)
 
+    # Single shared sampler — stratified batches, no case repetition across conditions/runs
+    shared_sampler = DataSampler()
     # longitudinal_results[experiment_name] = list of metrics dicts (one per run)
     longitudinal_results: Dict[str, List[Dict]] = {}
 
@@ -591,6 +654,7 @@ def run_longitudinal_study(
                 run_number=run_num,
                 reviewer_mode=reviewer_mode,
                 judge_model=judge_model,
+                sampler=shared_sampler,
             )
             run_metrics.append({"run": run_num, **metrics})
 
@@ -622,14 +686,15 @@ def _print_multi_run_summary(experiment_name: str, all_metrics: List[Dict]):
     print(f"MULTI-RUN SUMMARY  [{experiment_name}]")
     print("=" * 75)
     print(
-        f"  {'Run':<5} {'Acc':>6} {'Halluc':>7} {'Conf✓':>7} {'Conf✗':>7} "
+        f"  {'Run':<5} {'Acc':>6} {'Hold':>6} {'Halluc':>7} {'Conf✓':>7} {'Conf✗':>7} "
         f"{'RAG→':>6} {'Patch→':>7} {'Flag':>5}  Top failure modes"
     )
-    print(f"  {'-' * 70}")
+    print(f"  {'-' * 78}")
     for m in all_metrics:
         calib = m.get("confidence_calibration", {})
         conf_ok  = calib.get("avg_confidence_correct")
         conf_bad = calib.get("avg_confidence_incorrect")
+        holdout  = m.get("holdout_accuracy")
 
         breakdown = m.get("failure_mode_breakdown", {})
         top_failures = ", ".join(
@@ -639,6 +704,7 @@ def _print_multi_run_summary(experiment_name: str, all_metrics: List[Dict]):
         print(
             f"  {m['run']:<5} "
             f"{m.get('accuracy', 0):>6.2f} "
+            f"{str(round(holdout, 2)) if holdout is not None else 'N/A':>6} "
             f"{m.get('hallucinations', 0):>7} "
             f"{str(round(conf_ok, 0)) if conf_ok is not None else 'N/A':>7} "
             f"{str(round(conf_bad, 0)) if conf_bad is not None else 'N/A':>7} "
@@ -649,6 +715,8 @@ def _print_multi_run_summary(experiment_name: str, all_metrics: List[Dict]):
         )
     print()
     # Column legend
+    print("  Acc     = training-set accuracy (in-sample)")
+    print("  Hold    = held-out accuracy (out-of-sample generalisation)")
     print("  Conf✓/✗ = avg model confidence on correct/incorrect cases")
     print("  RAG→    = failures routed to RAG (need more examples)")
     print("  Patch→  = failures routed to prompt patch")
@@ -849,6 +917,74 @@ def _ask_reviewer_mode() -> tuple:
     return "human", "gemini-3-flash-preview"
 
 
+def _show_prompt_diff():
+    """Print a before/after diff of prompt instructions for any patch file."""
+    import glob as _glob
+
+    patch_files = sorted(_glob.glob("logs/prompts/*_instruction_patch.json"))
+    if not patch_files:
+        print("  No patch files found in logs/prompts/")
+        return
+
+    print()
+    print("  Available prompt patches:")
+    for i, path in enumerate(patch_files, 1):
+        ts = os.path.basename(path).replace("_instruction_patch.json", "")
+        print(f"    [{i}]  {ts}")
+    print()
+
+    raw = input(f"  Select patch [1-{len(patch_files)}]: ").strip()
+    if not raw.isdigit() or not (1 <= int(raw) <= len(patch_files)):
+        print("  Invalid selection.")
+        return
+
+    patch_path = patch_files[int(raw) - 1]
+    with open(patch_path) as f:
+        patch = json.load(f)
+
+    # Load the base prompt to show original instructions
+    ip = patch.get("instruction_patch", {})
+    to_add = ip.get("instructions_to_add", [])
+    to_refine = ip.get("instructions_to_refine", [])
+    failures = patch.get("aggregated_failures", {})
+
+    print()
+    print("=" * 60)
+    print(f"  PROMPT DIFF — {os.path.basename(patch_path)}")
+    print("=" * 60)
+
+    print()
+    print("  Failure modes that triggered this patch:")
+    for mode, info in sorted(failures.items(), key=lambda x: -x[1].get("count", 0)):
+        print(f"    {mode:35s} {info.get('count', '?')}x")
+
+    if to_add:
+        print()
+        print("  + ADDED instructions:")
+        for instr in to_add:
+            print(f"    + {instr}")
+
+    if to_refine:
+        print()
+        print("  ~ REFINED instructions:")
+        for item in to_refine:
+            print(f"    BEFORE: {item.get('target_instruction', '?')}")
+            print(f"    AFTER : {item.get('refined_version', '?')}")
+            print()
+
+    if not to_add and not to_refine:
+        print("  (no instruction changes recorded)")
+
+    print()
+    print("  Rationale:")
+    rationale = ip.get("rationale", "(none)")
+    # Wrap at 70 chars
+    import textwrap
+    for line in textwrap.wrap(rationale, width=70):
+        print(f"    {line}")
+    print()
+
+
 def interactive_cli():
     prompt_path = "logs/prompts/v1_initial.json"
 
@@ -862,6 +998,7 @@ def interactive_cli():
         print("  [2]  Multi-run          — one condition, N improving runs")
         print("  [3]  Ablation study     — all conditions, single run, compare")
         print("  [4]  Longitudinal study — all conditions, N runs (full protocol)")
+        print("  [5]  Prompt diff        — show what changed between prompt versions")
         print()
         print("  [q]  Quit")
         print()
@@ -939,8 +1076,11 @@ def interactive_cli():
                 judge_model=judge_model,
             )
 
+        elif choice == "5":
+            _show_prompt_diff()
+
         else:
-            print("  Unknown option. Try 1–4 or q.")
+            print("  Unknown option. Try 1–5 or q.")
 
 
 # ================================================================

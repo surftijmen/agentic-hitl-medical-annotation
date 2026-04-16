@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import pandas as pd
 from datetime import datetime
 
@@ -13,7 +13,7 @@ class AnnotationStore:
         hadm_id: int,
         note_text: str,
         annotation: Dict,
-        gold: str,
+        gold: Union[Dict[str, Any], str, None],
         human_feedback: Dict,
         prompt_version: str,
     ):

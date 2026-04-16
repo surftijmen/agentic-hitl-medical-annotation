@@ -1,115 +1,115 @@
+"""Data sampler for the HITL pipeline.
+
+Reads the preprocessed parquet produced by scripts/preprocess_new_data.py
+(one discharge summary per admission with its primary ICD-9 diagnosis) and
+returns stratified batches where the gold label is the ICD-9 code + titles.
+"""
+
 import pandas as pd
 
 
-# Maps substrings of the MIMIC-III admission DIAGNOSIS field to the
-# allowed_diagnoses labels used by the annotator prompt.
-DIAGNOSIS_LABEL_MAP = {
-    "PNEUMONIA": "Pneumonia",
-    "SEPSIS": "Sepsis",
-    "CONGESTIVE HEART FAILURE": "CHF",
-    "CORONARY ARTERY DISEASE": "CAD",
-    "HYPERTENSION": "Hypertension",
-    "DIABETES": "Diabetes",
-    "CHRONIC OBSTRUCTIVE PULMONARY DISEASE": "COPD",
-    "COPD": "COPD",
-    "ATRIAL FIBRILLATION": "Atrial Fibrillation",
-    " AFIB": "Atrial Fibrillation",
-    "CHRONIC KIDNEY DISEASE": "CKD",
-    "ASTHMA": "Asthma",
-    "CANCER": "Cancer",
-    "CARCINOMA": "Cancer",
-    "MALIGNANCY": "Cancer",
-    "TUMOR": "Cancer",
-    "NEOPLASM": "Cancer",
-    "STROKE": "Stroke",
-    "CEREBROVASCULAR ACCIDENT": "Stroke",
-    "CVA": "Stroke",
-    "MYOCARDIAL INFARCTION": "MI",
-    " MI ": "MI",
-    "STEMI": "MI",
-    "NSTEMI": "MI",
-    "TUBERCULOSIS": "Tuberculosis",
-    "ANEMIA": "Anemia",
-    "CIRRHOSIS": "Cirrhosis",
-    "HIV": "HIV",
-    "AIDS": "HIV",
-    "OBESITY": "Obesity",
-    "URINARY TRACT INFECTION": "UTI",
-    " UTI": "UTI",
-    "DEEP VEIN THROMBOSIS": "DVT",
-    " DVT": "DVT",
-    "PULMONARY EMBOLISM": "PE",
-}
+def _icd9_chapter(code: str) -> str:
+    """ICD-9-CM chapter bucket — fallback for rows that lack a precomputed one."""
+    if not code:
+        return "Unknown"
+    c = str(code).strip().upper()
+    if c.startswith("V"):
+        return "V: Supplementary (V-codes)"
+    if c.startswith("E"):
+        return "E: External causes (E-codes)"
+    head = c[:3]
+    try:
+        n = int(head)
+    except ValueError:
+        return "Unknown"
+    if   1   <= n <= 139: return "01: Infectious/parasitic"
+    elif 140 <= n <= 239: return "02: Neoplasms"
+    elif 240 <= n <= 279: return "03: Endocrine/metabolic"
+    elif 280 <= n <= 289: return "04: Blood/immune"
+    elif 290 <= n <= 319: return "05: Mental"
+    elif 320 <= n <= 389: return "06: Nervous/sense"
+    elif 390 <= n <= 459: return "07: Circulatory"
+    elif 460 <= n <= 519: return "08: Respiratory"
+    elif 520 <= n <= 579: return "09: Digestive"
+    elif 580 <= n <= 629: return "10: Genitourinary"
+    elif 630 <= n <= 679: return "11: Pregnancy/childbirth"
+    elif 680 <= n <= 709: return "12: Skin/subcutaneous"
+    elif 710 <= n <= 739: return "13: Musculoskeletal"
+    elif 740 <= n <= 759: return "14: Congenital"
+    elif 760 <= n <= 779: return "15: Perinatal"
+    elif 780 <= n <= 799: return "16: Symptoms/ill-defined"
+    elif 800 <= n <= 999: return "17: Injury/poisoning"
+    return "Unknown"
 
 
-def _map_diagnosis(raw: str) -> str | None:
-    """Return the normalized label only if the raw string unambiguously maps to
-    exactly one allowed diagnosis.  Multi-diagnosis strings like 'CVA; CHF PNEUMONIA'
-    that match multiple distinct labels are excluded (return None) because the sampler
-    cannot reliably determine which is the primary admission diagnosis.
-    """
-    upper = str(raw).upper()
-    matched_labels = {
-        label
-        for key, label in DIAGNOSIS_LABEL_MAP.items()
-        if key in upper
-    }
-    if len(matched_labels) == 1:
-        return next(iter(matched_labels))
-    return None
+DEFAULT_PROCESSED_PATH = "data/new/processed/notes_with_gold.parquet"
+HOLDOUT_SIZE = 200
+# Fixed seed so the 200-row holdout is the same across runs — lets accuracy
+# numbers be compared iteration-to-iteration under the new gold.
+DEFAULT_SEED = 20260414
 
 
 class DataSampler:
     def __init__(
         self,
-        notes_path: str,
-        adm_path: str,
-        seed: int = 122,
+        processed_path: str = DEFAULT_PROCESSED_PATH,
+        seed: int = DEFAULT_SEED,
     ):
-        notes_df = pd.read_parquet(
-            notes_path,
-            columns=["ROW_ID", "SUBJECT_ID", "HADM_ID", "CATEGORY", "TEXT"],
-        )
+        df = pd.read_parquet(processed_path)
 
-        adm_df = pd.read_parquet(
-            adm_path,
-            columns=["SUBJECT_ID", "HADM_ID", "DIAGNOSIS"],
-        )
+        # Minimal sanity guard (preprocess already did the real filtering)
+        df = df[df["TEXT"].notna() & df["long_title"].notna()].copy()
+        df = df[df["long_title"].astype(str).str.len() > 0]
 
-        merged = notes_df.merge(adm_df, on=["SUBJECT_ID", "HADM_ID"], how="inner")
+        if "icd9_chapter" not in df.columns:
+            df["icd9_chapter"] = df["icd9_code"].map(_icd9_chapter)
 
-        # Filter 1: only discharge summaries — these reliably contain confirmed diagnoses.
-        # Nursing notes, radiology reports, etc. often don't state the primary diagnosis.
-        discharge_mask = merged["CATEGORY"].str.lower().str.strip() == "discharge summary"
-
-        # Filter 2: drop "rule out" cases — DIAGNOSIS values starting with "R/O" mean
-        # the condition was NOT confirmed. Keeping them produces unachievable gold labels
-        # (e.g. "R/O LYMPHOMA" → gold="Cancer" but the note says rule-out lymphoma).
-        ruleout_mask = ~merged["DIAGNOSIS"].str.upper().str.startswith("R/O")
-
-        # Filter 3: only rows where the admission DIAGNOSIS maps to one of the 21
-        # allowed labels. Other rows have unanswerable ground truth (e.g. "NEWBORN",
-        # "LOWER GI BLEED") that will always score as incorrect regardless of AI output.
-        merged["label"] = merged["DIAGNOSIS"].apply(_map_diagnosis)
-        label_mask = merged["label"].notna()
-
-        filtered = merged[discharge_mask & ruleout_mask & label_mask].copy()
+        # Build the gold-label dict column once so downstream code reads row["gold"].
+        df["gold"] = df[["icd9_code", "short_title", "long_title"]].to_dict(orient="records")
 
         print(
-            f"  [DataSampler] {len(filtered):,} usable rows after filtering "
-            f"(discharge summaries with mappable labels) "
-            f"from {len(merged):,} total merged rows."
+            f"  [DataSampler] {len(df):,} usable rows from {processed_path} "
+            f"({df['icd9_chapter'].nunique()} ICD-9 chapters, "
+            f"{df['icd9_code'].nunique():,} unique codes)"
         )
 
-        self.df = (
-            filtered
-            .sample(frac=1, random_state=seed)
-            .reset_index(drop=True)
-        )
+        shuffled = df.sample(frac=1, random_state=seed).reset_index(drop=True)
 
-        self.cursor = 0
+        # Reserve the last HOLDOUT_SIZE rows as a fixed held-out test set.
+        self.holdout_df = shuffled.iloc[-HOLDOUT_SIZE:].reset_index(drop=True)
+        self.df        = shuffled.iloc[:-HOLDOUT_SIZE].reset_index(drop=True)
+
+        self._rng = pd.core.common.random_state(seed)
 
     def sample_batch(self, n: int) -> pd.DataFrame:
-        batch = self.df.iloc[self.cursor : self.cursor + n]
-        self.cursor += n
-        return batch
+        """Stratified random sample across ICD-9 chapters.
+
+        When n >= number of chapters, draws n // num_chapters per chapter so
+        every chapter is represented. When n is smaller, falls back to a
+        plain random sample of n rows so the requested size is respected.
+        """
+        chapters = self.df["icd9_chapter"].unique()
+
+        if n < len(chapters):
+            return self.df.sample(n=n, random_state=self._rng).reset_index(drop=True)
+
+        per_class = n // len(chapters)
+        remainder = n - per_class * len(chapters)
+
+        frames = []
+        for chapter in chapters:
+            pool = self.df[self.df["icd9_chapter"] == chapter]
+            k = min(per_class, len(pool))
+            if k > 0:
+                frames.append(pool.sample(n=k, random_state=self._rng))
+
+        sampled_ids = pd.concat(frames).index if frames else pd.Index([])
+        leftover = self.df.drop(index=sampled_ids)
+        if remainder > 0 and len(leftover) > 0:
+            frames.append(leftover.sample(n=min(remainder, len(leftover)), random_state=self._rng))
+
+        return pd.concat(frames).sample(frac=1, random_state=self._rng).reset_index(drop=True)
+
+    def sample_holdout(self) -> pd.DataFrame:
+        """Return the fixed held-out test set (same rows every call)."""
+        return self.holdout_df

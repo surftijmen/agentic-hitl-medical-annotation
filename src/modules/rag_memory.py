@@ -2,6 +2,8 @@
 import time
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from google import genai
 from google.genai import types
 import toml
@@ -13,54 +15,116 @@ class RAGMemory:
         self.display_name = display_name
 
         if store_name:
-            # Resume existing store
             self.store = self.client.file_search_stores.get(name=store_name)
         else:
-            # Create new store
             self.store = self.client.file_search_stores.create(
                 config={"display_name": display_name}
             )
             print(f"  Created new File Search Store: {self.store.name}")
 
+        # Cache existing doc names once — avoids one API call per add_case
+        self._existing: set[str] = set()
+        self._existing_lock = threading.Lock()
+        try:
+            docs = self.client.file_search_stores.documents.list(parent=self.store.name)
+            self._existing = {doc.display_name for doc in docs}
+        except Exception:
+            pass
+
     @property
     def store_name(self):
         return self.store.name
 
-    def add_case(self, retrieval_text: str, full_record: dict):
+    # Short poll only for logging — the file is already in Google's system once
+    # upload_to_file_search_store returns. Indexing happens asynchronously; we
+    # don't need it complete before moving on, because:
+    #   - Uploads happen at the END of a pipeline run, after all annotations.
+    #   - The next run that uses this store rebuilds `self._existing` from the
+    #     live API, so whatever has indexed by then is used.
+    # So "fire, briefly peek, move on" is correct and orders of magnitude faster.
+    _UPLOAD_POLL_SECS    = 1.0   # poll interval during the brief wait
+    _UPLOAD_POLL_ATTEMPTS = 8    # 8 × 1 s = 8 s max inline wait per case
+
+    def _upload_one(self, retrieval_text: str, full_record: dict) -> str:
+        """Upload a single case. Returns display_name once Google has accepted
+        the file. Does NOT block until indexing completes — the file is queued
+        for background indexing and will be retrievable on subsequent runs."""
         subject_id = full_record.get("subject_id", "unknown")
         hadm_id = full_record.get("hadm_id", "unknown")
-        target_display_name = f"case-{subject_id}-{hadm_id}"
+        display_name = f"case-{subject_id}-{hadm_id}"
 
-        # 1. CHECK FOR DUPLICATES FIRST
-        try:
-            existing_docs = self.client.file_search_stores.documents.list(parent=self.store.name)
-            if any(doc.display_name == target_display_name for doc in existing_docs):
-                print(f"    RAG: {target_display_name} already exists. Skipping.")
-                return
-        except Exception as e:
-            print(f"    RAG: Error checking existing cases: {e}")
-
-        # 2. PROCEED ONLY IF NEW
         content = f"{retrieval_text}\n\n---METADATA---\n{json.dumps(full_record, indent=2)}"
-
-        # Write to a temp file and upload
         tmp_path = f"/tmp/rag_case_{subject_id}_{hadm_id}.txt"
         with open(tmp_path, "w") as f:
             f.write(content)
 
-        operation = self.client.file_search_stores.upload_to_file_search_store(
-            file=tmp_path,
-            file_search_store_name=self.store.name,
-            config={"display_name": f"case-{subject_id}-{hadm_id}"},
-        )
+        try:
+            operation = self.client.file_search_stores.upload_to_file_search_store(
+                file=tmp_path,
+                file_search_store_name=self.store.name,
+                config={"display_name": display_name},
+            )
+            # Brief peek — catches fast-indexing cases so logs reflect reality.
+            # If still pending, leave it queued; indexing continues server-side.
+            for _ in range(self._UPLOAD_POLL_ATTEMPTS):
+                if operation.done:
+                    break
+                time.sleep(self._UPLOAD_POLL_SECS)
+                try:
+                    operation = self.client.operations.get(operation)
+                except Exception:
+                    # Transient check failure — the upload itself already landed.
+                    break
+        finally:
+            os.remove(tmp_path)
 
-        # Wait for indexing
-        while not operation.done:
-            time.sleep(3)
-            operation = self.client.operations.get(operation)
+        return display_name
 
-        os.remove(tmp_path)
-        print(f"    RAG: case {subject_id}/{hadm_id} indexed")
+    def add_case(self, retrieval_text: str, full_record: dict):
+        """Add a single case (dedup via in-memory cache, no extra API call)."""
+        subject_id = full_record.get("subject_id", "unknown")
+        hadm_id = full_record.get("hadm_id", "unknown")
+        display_name = f"case-{subject_id}-{hadm_id}"
+
+        with self._existing_lock:
+            if display_name in self._existing:
+                print(f"    RAG: {display_name} already exists. Skipping.")
+                return
+            self._existing.add(display_name)  # reserve slot before upload
+
+        name = self._upload_one(retrieval_text, full_record)
+        print(f"    RAG: {name} indexed")
+
+    def add_cases_parallel(self, cases: list[tuple[str, dict]], max_workers: int = 12):
+        """Upload multiple cases concurrently. cases = [(retrieval_text, full_record), ...]"""
+        new_cases = []
+        with self._existing_lock:
+            for retrieval_text, full_record in cases:
+                subject_id = full_record.get("subject_id", "unknown")
+                hadm_id = full_record.get("hadm_id", "unknown")
+                display_name = f"case-{subject_id}-{hadm_id}"
+                if display_name in self._existing:
+                    print(f"    RAG: {display_name} already exists. Skipping.")
+                else:
+                    self._existing.add(display_name)
+                    new_cases.append((retrieval_text, full_record))
+
+        if not new_cases:
+            return
+
+        print(f"    RAG: uploading {len(new_cases)} new cases in parallel...")
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self._upload_one, text, record): record
+                for text, record in new_cases
+            }
+            for future in as_completed(futures):
+                try:
+                    name = future.result()
+                    print(f"    RAG: {name} indexed")
+                except Exception as e:
+                    record = futures[future]
+                    print(f"    RAG: upload failed for {record.get('subject_id')}/{record.get('hadm_id')}: {e}")
 
     def get_tool(self) -> types.Tool:
         """Return the Gemini tool config to pass at generation time."""
