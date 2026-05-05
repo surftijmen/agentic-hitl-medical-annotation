@@ -53,9 +53,14 @@ def main() -> None:
         help="Gemini judge model (structured output enforced in AutoReviewer).",
     )
     parser.add_argument(
+        "--annotator-model",
+        default="gemini-2.5-flash",
+        help="Gemini model used by the annotator. Default gemini-2.5-flash matches existing baseline; use gemini-2.5-pro for the Layer-3 upgrade study.",
+    )
+    parser.add_argument(
         "--prompt",
         default="logs/prompts/v1_initial.json",
-        help="Starting prompt (v1_initial.json has the whitelist removed).",
+        help="Starting prompt (v1_initial.json has the whitelist removed; v2_primary_focus.json is the Layer-2 improved prompt).",
     )
     args = parser.parse_args()
 
@@ -69,12 +74,13 @@ def main() -> None:
     print("=" * 70)
     print("OFFICIAL STUDY")
     print("=" * 70)
-    print(f"  conditions : {conditions}")
-    print(f"  runs       : {args.runs}")
-    print(f"  n per run  : {args.n}")
-    print(f"  judge      : {args.judge}")
-    print(f"  prompt     : {args.prompt}")
-    print(f"  total      : {len(conditions) * args.runs * args.n} annotator calls "
+    print(f"  conditions      : {conditions}")
+    print(f"  runs            : {args.runs}")
+    print(f"  n per run       : {args.n}")
+    print(f"  annotator model : {args.annotator_model}")
+    print(f"  judge model     : {args.judge}")
+    print(f"  prompt          : {args.prompt}")
+    print(f"  total           : {len(conditions) * args.runs * args.n} annotator calls "
           f"+ {len(conditions) * args.runs * args.n} judge calls")
     print("=" * 70)
     print()
@@ -86,6 +92,7 @@ def main() -> None:
         experiments_to_run=conditions,
         reviewer_mode="auto",
         judge_model=args.judge,
+        annotator_model=args.annotator_model,
     )
 
     print()

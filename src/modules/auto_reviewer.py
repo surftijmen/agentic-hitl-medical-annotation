@@ -163,7 +163,7 @@ class AutoReviewer:
 
     def __init__(
         self,
-        judge_model: str = "gemini-3-flash-preview",
+        judge_model: str = "gemini-2.5-flash",
         secrets_path: str = "./secrets.toml",
         verbose: bool = True,
     ):

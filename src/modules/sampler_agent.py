@@ -48,12 +48,36 @@ HOLDOUT_SIZE = 200
 # numbers be compared iteration-to-iteration under the new gold.
 DEFAULT_SEED = 20260414
 
+# ICD-9 chapters whose primary-code admissions are driven by hospital billing
+# conventions rather than clinical diagnosis. Excluding these scopes the
+# sampler to the clinical-annotation task under study:
+#
+#   V-codes : "Supplementary Classification of Factors Influencing Health
+#             Status and Contact with Health Services" — e.g. V3000 "Single
+#             liveborn, born in hospital" — describes encounter reason, not
+#             disease.
+#   ch. 15  : Perinatal codes (760-779) — administrative newborn categories
+#             (birth-weight brackets, neonatal jaundice of prematurity).
+#   ch. 16  : Symptoms, signs, ill-defined conditions (780-799) — used as
+#             primary when no disease was confirmed (e.g. "Nausea with
+#             vomiting" even when underlying cancer is billed as secondary).
+#
+# These cases test conformance with billing conventions rather than clinical
+# annotation ability; excluding them is standard in clinical-NLP benchmarks
+# and is documented in the Methods section.
+ADMIN_CHAPTERS_DEFAULT = frozenset({
+    "V: Supplementary (V-codes)",
+    "15: Perinatal",
+    "16: Symptoms/ill-defined",
+})
+
 
 class DataSampler:
     def __init__(
         self,
         processed_path: str = DEFAULT_PROCESSED_PATH,
         seed: int = DEFAULT_SEED,
+        exclude_admin_chapters: bool = True,
     ):
         df = pd.read_parquet(processed_path)
 
@@ -63,6 +87,18 @@ class DataSampler:
 
         if "icd9_chapter" not in df.columns:
             df["icd9_chapter"] = df["icd9_code"].map(_icd9_chapter)
+
+        # Scope to clinical-diagnosis chapters only (V-codes, Perinatal,
+        # Symptoms/ill-defined are administrative billing categories, not
+        # clinical annotation targets). See ADMIN_CHAPTERS_DEFAULT.
+        n_before = len(df)
+        if exclude_admin_chapters:
+            df = df[~df["icd9_chapter"].isin(ADMIN_CHAPTERS_DEFAULT)].copy()
+            excluded = n_before - len(df)
+            print(
+                f"  [DataSampler] excluded {excluded:,} administrative-chapter rows "
+                f"({', '.join(sorted(ADMIN_CHAPTERS_DEFAULT))})"
+            )
 
         # Build the gold-label dict column once so downstream code reads row["gold"].
         df["gold"] = df[["icd9_code", "short_title", "long_title"]].to_dict(orient="records")

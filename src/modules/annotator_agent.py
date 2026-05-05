@@ -377,7 +377,8 @@ class Annotator:
 
     def _call_model(self, user_prompt: str, temperature: float = 0.0):
         config = self._build_config(temperature)
-        max_retries = 4
+        import random
+        max_retries = 6
         for attempt in range(max_retries):
             try:
                 return self.client.models.generate_content(
@@ -388,8 +389,14 @@ class Annotator:
             except Exception as e:
                 err = str(e)
                 if ("503" in err or "429" in err or "UNAVAILABLE" in err) and attempt < max_retries - 1:
-                    wait = 5 * (attempt + 1)
-                    print(f" [retry {attempt+1}/{max_retries-1}, {wait}s]", end="", flush=True)
+                    # Parse API-suggested retry delay if present; otherwise
+                    # exponential backoff. Jitter (1-5s) is critical with many
+                    # parallel workers — without it they all wake simultaneously
+                    # and rate-limit each other again (thundering herd).
+                    suggested = re.search(r"retry[^\d]*(\d+(?:\.\d+)?)s", err)
+                    base_wait = float(suggested.group(1)) if suggested else 5 * (2 ** attempt)
+                    wait = base_wait + random.uniform(1, 5)
+                    print(f" [retry {attempt+1}/{max_retries-1}, {wait:.1f}s]", end="", flush=True)
                     time.sleep(wait)
                 else:
                     raise

@@ -218,3 +218,13 @@ secrets.toml
 logs
 rag_meta.json
 rag.index
+
+# docs (paper drafts, slides, figures — excluded from VCS)
+docs/
+
+# Claude
+CLAUDE.md
+.claude/
+
+# macOS
+.DS_Store

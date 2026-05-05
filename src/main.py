@@ -195,9 +195,10 @@ def run_pipeline(
     experiment_name: str = "unnamed",
     run_number: int = 1,
     reviewer_mode: str = "human",
-    judge_model: str = "gemini-3-flash-preview",
+    judge_model: str = "gemini-2.5-flash",
     max_workers: int = 5,
     sampler: Optional[DataSampler] = None,
+    annotator_model: str = "gemini-2.5-flash",
 ):
     """
     Execute one full annotation pipeline run with human-in-the-loop review.
@@ -241,8 +242,9 @@ def run_pipeline(
     print("done")
 
     # ── 3. Annotator ─────────────────────────────────────────────
-    print("  [4/8] Initializing AI annotator...", end=" ", flush=True)
+    print(f"  [4/8] Initializing AI annotator ({annotator_model})...", end=" ", flush=True)
     annotator = Annotator(
+        model_name=annotator_model,
         prompt_path=prompt_path,
         debug=debug,
         technique_config=TechniqueConfig(
@@ -260,6 +262,8 @@ def run_pipeline(
         "sample_size": sample_size,
         "techniques": config.__dict__,
         "rag_store": rag.store_name if rag else None,
+        "annotator_model": annotator_model,
+        "judge_model": judge_model,
     })
     print("done")
 
@@ -269,7 +273,11 @@ def run_pipeline(
     print("done")
 
     # ── 5. Annotate (parallel) ───────────────────────────────────
-    print(f"  [6/8] Generating annotations (parallel, {sample_size} workers)...")
+    # 8 workers stays safely under Gemini's per-minute RPM cap at flash/pro
+    # rates while still parallelising batches of 200. Higher concurrency
+    # triggers thundering-herd retries that waste time net-negative.
+    annotator_workers = min(sample_size, 8)
+    print(f"  [6/8] Generating annotations (parallel, {annotator_workers} workers)...")
     rows = list(batch.iterrows())
 
     def _annotate(args):
@@ -280,7 +288,7 @@ def run_pipeline(
         return i, row, text, annotation
 
     _ann_results: Dict[int, tuple] = {}
-    with ThreadPoolExecutor(max_workers=min(sample_size, 20)) as pool:
+    with ThreadPoolExecutor(max_workers=annotator_workers) as pool:
         futures = {pool.submit(_annotate, item): item[0] for item in enumerate(rows, 1)}
         for f in as_completed(futures):
             i, row, text, annotation = f.result()
@@ -337,7 +345,7 @@ def run_pipeline(
 
     if reviewer_mode == "auto":
         # Rate limiter: enforces a minimum interval between API call starts so we
-        # stay under the judge model's quota (gemini-3.1-pro: 25 req/min → 1 per 2.5s).
+        # stay under the judge model's quota (at 2.5-flash: 60 req/min → 1 per 1s).
         # The lock is released before the actual API call so multiple calls can be
         # in-flight simultaneously — new ones just can't START more than once per interval.
         import time as _time
@@ -514,7 +522,8 @@ def run_multi_pipeline(
     initial_prompt_path: str = "logs/prompts/v1_initial.json",
     experiment_name: str = "full_pipeline",
     reviewer_mode: str = "human",
-    judge_model: str = "gemini-3-flash-preview",
+    judge_model: str = "gemini-2.5-flash",
+    annotator_model: str = "gemini-2.5-flash",
 ):
     """
     Run one experiment multiple times in sequence.
@@ -555,6 +564,7 @@ def run_multi_pipeline(
             reviewer_mode=reviewer_mode,
             judge_model=judge_model,
             sampler=shared_sampler,
+            annotator_model=annotator_model,
         )
 
         all_metrics.append({"run": run_num, **metrics})
@@ -601,7 +611,8 @@ def run_longitudinal_study(
     prompt_path: str = "logs/prompts/v1_initial.json",
     experiments_to_run: Optional[list] = None,
     reviewer_mode: str = "human",
-    judge_model: str = "gemini-3-flash-preview",
+    judge_model: str = "gemini-2.5-flash",
+    annotator_model: str = "gemini-2.5-flash",
 ):
     """
     Run each experimental condition for `num_runs` sequential runs.
@@ -655,6 +666,7 @@ def run_longitudinal_study(
                 reviewer_mode=reviewer_mode,
                 judge_model=judge_model,
                 sampler=shared_sampler,
+                annotator_model=annotator_model,
             )
             run_metrics.append({"run": run_num, **metrics})
 
@@ -781,7 +793,8 @@ def run_ablation_study(
     prompt_path: str = "logs/prompts/v1_initial.json",
     experiments_to_run: Optional[list] = None,
     reviewer_mode: str = "human",
-    judge_model: str = "gemini-3-flash-preview",
+    judge_model: str = "gemini-2.5-flash",
+    annotator_model: str = "gemini-2.5-flash",
 ):
     """
     Run each experimental condition once and compare results.
@@ -814,6 +827,7 @@ def run_ablation_study(
             experiment_name=name,
             reviewer_mode=reviewer_mode,
             judge_model=judge_model,
+            annotator_model=annotator_model,
         )
 
         metrics["experiment"] = name
@@ -888,33 +902,27 @@ def _ask_reviewer_mode() -> tuple:
     if choice == "a":
         print()
         print("  Judge model options:")
-        print("    [1]  gemini-3.1-pro-preview   (latest Gemini 3 — strongest judge)")
-        print("    [2]  gemini-3-pro-preview      (Gemini 3 Pro)")
-        print("    [3]  gemini-3-flash-preview    (Gemini 3 Flash — faster)")
-        print("    [4]  gemini-2.5-pro            (Gemini 2.5 Pro — stable)")
-        print("    [5]  gemini-2.5-flash          (Gemini 2.5 Flash — fastest)")
+        print("    [1]  gemini-2.5-flash          (Gemini 2.5 Flash — fastest, default)")
+        print("    [2]  gemini-2.5-pro            (Gemini 2.5 Pro — stronger)")
         print("    [c]  custom                    — type any model ID")
         print()
-        m = input("  Select [1-5/c, default 3]: ").strip().lower()
+        m = input("  Select [1-2/c, default 1]: ").strip().lower()
         judge_map = {
-            "1": "gemini-3.1-pro-preview",
-            "2": "gemini-3-pro-preview",
-            "3": "gemini-3-flash-preview",
-            "4": "gemini-2.5-pro",
-            "5": "gemini-2.5-flash",
+            "1": "gemini-2.5-flash",
+            "2": "gemini-2.5-pro",
         }
         if m in judge_map:
             judge = judge_map[m]
         elif m == "c":
             raw = input("  Model ID (leave blank to cancel): ").strip()
-            judge = raw if raw else "gemini-3-flash-preview"
+            judge = raw if raw else "gemini-2.5-flash"
             if not raw:
-                print("  No model entered — defaulting to gemini-3-flash-preview")
+                print("  No model entered — defaulting to gemini-2.5-flash")
         else:
-            judge = "gemini-3-flash-preview"
+            judge = "gemini-2.5-flash"
         print(f"  Auto-review enabled with judge: {judge}")
         return "auto", judge
-    return "human", "gemini-3-flash-preview"
+    return "human", "gemini-2.5-flash"
 
 
 def _show_prompt_diff():
