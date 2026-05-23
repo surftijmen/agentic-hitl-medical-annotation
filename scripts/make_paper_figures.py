@@ -189,7 +189,7 @@ def fig_chapter_breakdown():
         return (0, ch)
 
     items = sorted(buckets.items(), key=sort_key)
-    chapters  = [k.split(":")[0] if ":" in k else k for k, _ in items]
+    chapters  = [k.split(":", 1)[1].strip() if ":" in k else k for k, _ in items]
     strict    = [b["strict"] / b["n"] if b["n"] else 0 for _, b in items]
     lenient_a = [b["lenient"] / b["n"] if b["n"] else 0 for _, b in items]
     is_admin  = [k in ADMIN_CHAPTERS_DEFAULT for k, _ in items]
@@ -197,7 +197,7 @@ def fig_chapter_breakdown():
     x = np.arange(len(chapters))
     w = 0.4
 
-    fig, ax = plt.subplots(figsize=(8.5, 3.6))
+    fig, ax = plt.subplots(figsize=(9.5, 4.0))
     ax.bar(x - w/2, strict,    w, label="Strict (SEQ_NUM=1)",      color="#3b82f6")
     ax.bar(x + w/2, lenient_a, w, label="Lenient (any billed ICD)", color="#a855f7")
 
