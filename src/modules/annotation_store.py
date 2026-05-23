@@ -42,26 +42,51 @@ class AnnotationStore:
 
     def to_rag_record(self, record: Dict) -> Optional[Dict]:
         """
-        Returns a RAG record for validated (correct) cases only.
-        Includes subject_id and hadm_id so RAG deduplication works.
-        """
-        if record.get("human_correct") is not True:
-            return None
+        Build a RAG record for a reviewed annotation.
 
-        final_dx = record["model_diagnosis"]
-        if not final_dx or final_dx.lower() == "none":
+        Both validated (correct) and corrected (incorrect-but-reviewed) cases
+        enter the store as `note → correct diagnosis` pairs:
+          • validated  : retrieval target = the model's diagnosis (which was right)
+          • corrected  : retrieval target = the gold long_title    (the correction)
+        Ambiguous cases are skipped because the gold itself is unreliable.
+
+        Storing corrected cases removes the selection-bias loop of the
+        validated-only design, where hard charts the model got wrong were
+        never represented in the store.
+        """
+        failure_mode = record.get("human_failure_mode")
+        is_correct = record.get("human_correct") is True
+
+        if is_correct:
+            final_dx = record["model_diagnosis"]
+            source = "validated"
+        else:
+            # Skip ambiguous cases — gold may itself be wrong/vague.
+            if failure_mode == "ambiguous_case":
+                return None
+            gold = record.get("gold_reference")
+            if isinstance(gold, dict):
+                final_dx = gold.get("long_title") or gold.get("short_title")
+            elif isinstance(gold, str):
+                final_dx = gold
+            else:
+                final_dx = None
+            source = "corrected"
+
+        if not final_dx or str(final_dx).lower() == "none":
             return None
 
         retrieval_text = self.build_retrieval_text(record["note_text"], final_dx)
 
         return {
             "retrieval_text": retrieval_text,
-            "subject_id": record["subject_id"],    # fixes case-unknown-unknown
-            "hadm_id": record["hadm_id"],          # fixes case-unknown-unknown
+            "subject_id": record["subject_id"],
+            "hadm_id": record["hadm_id"],
             "final_diagnosis": final_dx,
             "model_diagnosis": record["model_diagnosis"],
             "correct": record["human_correct"],
-            "failure_mode": record.get("human_failure_mode"),
+            "source": source,
+            "failure_mode": failure_mode,
             "doctor_confidence": record.get("human_confidence"),
             "model_confidence": record.get("model_confidence"),
             "note_text": record["note_text"],

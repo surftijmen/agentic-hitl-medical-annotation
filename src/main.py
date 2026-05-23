@@ -54,11 +54,33 @@ EXPERIMENTS = {
     # Run multi-run to observe the learning trajectory per technique.
     "baseline_hitl": TechniqueConfig(use_prompt_patching=True, use_feedback_routing=True),
     "few_shot_hitl": TechniqueConfig(use_few_shot=True, use_prompt_patching=True, use_feedback_routing=True),
+    "consistency_hitl": TechniqueConfig(use_self_consistency=True, use_prompt_patching=True, use_feedback_routing=True),
     "cot_hitl": TechniqueConfig(chain_of_thoughts=True, use_prompt_patching=True, use_feedback_routing=True),
     "cot_plus_few_shot_hitl": TechniqueConfig(chain_of_thoughts=True, use_few_shot=True, use_prompt_patching=True, use_feedback_routing=True),
+    "rag_hitl": TechniqueConfig(use_rag=True, use_prompt_patching=True, use_feedback_routing=True),
 
     # ── Full pipeline (all techniques) ────────────────────────────
     "full_pipeline": TechniqueConfig(
+        use_rag=True,
+        use_self_consistency=True,
+        chain_of_thoughts=True,
+        use_few_shot=True,
+        use_prompt_patching=True,
+        use_feedback_routing=True,
+    ),
+
+    # ── HITL trajectories at full sample size (n=200) ─────────────
+    # Same TechniqueConfig as full_pipeline; separate names so each gets
+    # its own RAG store and the flash/pro trajectories don't cross-contaminate.
+    "full_pipeline_flash": TechniqueConfig(
+        use_rag=True,
+        use_self_consistency=True,
+        chain_of_thoughts=True,
+        use_few_shot=True,
+        use_prompt_patching=True,
+        use_feedback_routing=True,
+    ),
+    "full_pipeline_pro": TechniqueConfig(
         use_rag=True,
         use_self_consistency=True,
         chain_of_thoughts=True,
@@ -80,9 +102,13 @@ RAG_STORE_PATHS = {
     "rag_plus_cot":             "logs/rag_stores/rag_plus_cot.txt",
     "baseline_hitl":            None,
     "few_shot_hitl":            None,
+    "consistency_hitl":         None,
     "cot_hitl":                 None,
     "cot_plus_few_shot_hitl":   None,
+    "rag_hitl":                 "logs/rag_stores/rag_hitl.txt",
     "full_pipeline":            "logs/rag_stores/full_pipeline.txt",
+    "full_pipeline_flash":      "logs/rag_stores/full_pipeline_flash.txt",
+    "full_pipeline_pro":        "logs/rag_stores/full_pipeline_pro.txt",
 }
 
 # Accumulated feedback signals persist across runs for prompt patching

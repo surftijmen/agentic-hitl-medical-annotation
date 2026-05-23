@@ -111,11 +111,15 @@ class HumanReviewer:
 
         self._divider(inner)
 
-        self.diagnosis_label = tk.Label(
-            inner, text="", font=("SF Pro Text", 13, "bold"),
-            bg=C_PANEL, fg=C_TEXT_DARK, anchor="w", wraplength=270,
+        self.diagnosis_box = tk.Text(
+            inner, height=3, wrap=tk.WORD,
+            font=("SF Pro Text", 13, "bold"),
+            bg=C_PANEL, fg=C_TEXT_DARK,
+            borderwidth=0, highlightthickness=0,
+            padx=0, pady=0, cursor="ibeam",
         )
-        self.diagnosis_label.pack(fill=tk.X, pady=(6, 2))
+        self.diagnosis_box.pack(fill=tk.X, pady=(6, 2))
+        self.diagnosis_box.config(state=tk.DISABLED)
 
         self.confidence_label = tk.Label(
             inner, text="", font=("SF Pro Text", 11),
@@ -129,11 +133,15 @@ class HumanReviewer:
         )
         self.cot_label.pack(fill=tk.X, pady=(2, 0))
 
-        self.gold_label = tk.Label(
-            inner, text="", font=("SF Pro Text", 11, "italic"),
-            bg=C_PANEL, fg=C_TEXT_LIGHT, anchor="w"
+        self.gold_box = tk.Text(
+            inner, height=4, wrap=tk.WORD,
+            font=("SF Pro Text", 11, "italic"),
+            bg=C_PANEL, fg=C_TEXT_LIGHT,
+            borderwidth=0, highlightthickness=0,
+            padx=0, pady=0, cursor="ibeam",
         )
-        self.gold_label.pack(fill=tk.X, pady=(4, 0))
+        self.gold_box.pack(fill=tk.X, pady=(4, 0))
+        self.gold_box.config(state=tk.DISABLED)
 
         self._divider(inner)
 
@@ -341,9 +349,10 @@ class HumanReviewer:
         self.note_box.config(state=tk.DISABLED)
 
         # ── Model output ──────────────────────────────────────────
-        self.diagnosis_label.config(
-            text=f"Diagnosis: {annotation.get('diagnosis', 'N/A')}"
-        )
+        self.diagnosis_box.config(state=tk.NORMAL)
+        self.diagnosis_box.delete("1.0", tk.END)
+        self.diagnosis_box.insert(tk.END, f"Diagnosis: {annotation.get('diagnosis', 'N/A')}")
+        self.diagnosis_box.config(state=tk.DISABLED)
         conf = annotation.get("confidence_level", "N/A")
         cons = annotation.get("consistency_score")
         if cons is not None:
@@ -370,7 +379,10 @@ class HumanReviewer:
             gold_text = f"Gold reference: {gold}"
         else:
             gold_text = ""
-        self.gold_label.config(text=gold_text)
+        self.gold_box.config(state=tk.NORMAL)
+        self.gold_box.delete("1.0", tk.END)
+        self.gold_box.insert(tk.END, gold_text)
+        self.gold_box.config(state=tk.DISABLED)
 
         self.root.mainloop()
         self.root.update()
