@@ -14,145 +14,92 @@ under study.
 
 ## Headline empirical findings
 
-Across five HITL conditions (baseline, CoT, few-shot, self-consistency,
+Across five HITL conditions (Baseline, CoT, Few-shot, Self-consistency,
 RAG) run for three iterations each at n=50 against MIMIC-III primary
 ICD-9 codes:
 
-- **Lenient accuracy converges to ~0.88, 0.90** at iteration 3 regardless
- of which prompt-engineering technique is layered on top of the loop.
+- **Lenient accuracy converges to a tight [0.86, 0.90] band** at
+  iteration 3 regardless of which prompt-engineering technique is
+  layered on top of the loop.
 - **No per-technique strict-accuracy difference is statistically
- resolvable at n=50** (two-iteration noise band ≈ ±17pp).
-- **Missed-entity errors dominate the failure budget** (65, 92% per iter);
- only the plain `baseline_hitl` condition shows a monotonic reduction.
-- The persistent ~13pp clinical-chapter strict/lenient gap is a property
- of MIMIC-III's billing-primary gold-label regime, not of the annotator.
+  resolvable at n=50** (iteration-to-iteration noise band ≈ ±17pp).
+- **Missed-entity errors dominate the failure budget** (mean 67%, range
+  42–91% per iter; modal in 14 of 15 iterations); only the plain
+  `baseline_hitl` condition shows a monotonic reduction across
+  iterations.
+- The persistent **~18pp clinical-chapter strict/lenient gap** (0.67 vs
+  0.85 on the human-reviewed n=100 baseline) is a property of
+  MIMIC-III's billing-primary gold-label regime, not of the annotator.
 
 The paper itself (LaTeX sources, figures, write-up) lives outside this
 repository, `docs/` is gitignored.
 
 ## System architecture
 
-```text
- ┌─────────────────────────────────────────────┐
- │ MIMIC-III discharge notes │
- └───────────────────┬─────────────────────────┘
- │ stratified n-sample
- ▼
- ┌──────────────────┐
- │ Annotator Agent │ Gemini 2.5-flash + technique
- │ (annotator_agent│ (CoT, few-shot, self-consistency,
- │ .py) │ RAG retrieval)
- └─────────┬────────┘
- │ free-text diagnosis + confidence
- ▼
- ┌──────────────────┐
- │ Reviewer │ Auto (LLM-as-judge) or Human (Tk UI)
- │ (auto_reviewer/ │ emits {correct, failure_mode,
- │ human_reviewer)│ comment, confidence}
- └─────────┬────────┘
- │ failure signals
- ▼
- ┌──────────────────┐
- │ Feedback Parser │ → routes terminology_gap → RAG
- │ (feedback_parser│ → routes other modes → patch
- │ .py) │ → flags ambiguous_case
- └────────┬─────────┘
- ┌───────┴────────┐
- ▼ ▼
- ┌──────────────┐ ┌──────────────┐
- │ Prompt Agent │ │ RAG Memory │ persistent store of
- │ (prompt_agent│ │ (rag_memory │ validated + corrected
- │ .py) │ │ .py) │ past (note,diagnosis) pairs
- └──────┬───────┘ └──────┬───────┘
- │ │
- ▼ ▼
- ┌──────────────────────────────┐
- │ next iteration: new prompt │
- │ + augmented RAG store │
- └──────────────────────────────┘
-```
+![Two-agent HITL framework architecture](figures/architecture.png)
 
 Every iteration is logged: per-case JSON dataframes go to
 `logs/experiments/<condition>/<run_id>.json` and prompts get
 version-stamped in `logs/prompts/`. Evaluation is performed *outside* the
-loop by scripts that consume only those log files.
+loop by scripts that consume only those log files. Per-case logs embed
+MIMIC-III note text and are **not** redistributed under the PhysioNet
+credentialled DUA; reproduction requires a credentialled MIMIC-III copy.
 
 ## Repository layout
 
 ```text
 src/
- main.py # entry point; experiment configs and CLI
- performance_evaluator.py # accuracy/reliability aggregation
- modules/
- annotator_agent.py # LLM annotator (Gemini, technique toggles)
- sampler_agent.py # stratified MIMIC sampling with reserved holdout
- auto_reviewer.py # LLM-as-judge with response-schema enforcement
- human_reviewer.py # interactive Tkinter review UI
- feedback_parser.py # parses verdicts into routed signals
- prompt_agent.py # generates instruction-level prompt patches
- rag_memory.py # Google File Search-backed RAG store
- annotation_store.py # per-case records + RAG-record construction
- technique_config.py # technique toggle dataclass
- logger.py # event log
-
-scripts/
- preprocess_new_data.py # one-time MIMIC-III → notes_with_gold.parquet
- run_official_study.py # canonical longitudinal study driver
- fill_sq2_gaps.py # 3 conditions × 3 iters at n=50
- fill_sq2_round2.py # few_shot_hitl, rag_hitl at n=50
- rescore_with_all_icds.py # post-hoc lenient re-judging (strict/lenient pair)
- judge_agreement_study.py # judge-vs-clinician kappa study
- analyze_by_chapter.py # per-ICD9-chapter breakdown
- analyze_hitl_trajectory.py # within-condition learning curve summary
- analyze_prompt_evolution.py # prompt-complexity diagnostics
- extract_findings.py # qualitative-case extraction
- inspect_flipped.py # cases that flip strict→lenient
- make_paper_figures.py # baseline/chapter/failure-mode figures
- make_sq2_trajectory_figure.py # fig_sq2_trajectories.png (paper)
- make_kappa_figure.py # fig_kappa_failure_modes.png (paper appendix)
+  main.py                       # entry point; experiment configs and CLI
+  performance_evaluator.py      # accuracy/reliability aggregation
+  modules/
+    annotator_agent.py          # LLM annotator (Gemini, technique toggles)
+    sampler_agent.py            # stratified MIMIC sampling with reserved holdout
+    auto_reviewer.py            # LLM-as-judge with response-schema enforcement
+    human_reviewer.py           # interactive Tkinter review UI
+    feedback_parser.py          # parses verdicts into routed signals
+    prompt_agent.py             # generates instruction-level prompt patches
+    rag_memory.py               # Google File Search-backed RAG store
+    annotation_store.py         # per-case records + RAG-record construction
+    technique_config.py         # technique toggle dataclass
+    logger.py                   # event log
 
 logs/
- prompts/v1_initial.json # tracked; all HITL trajectories start here
- prompts/v*_auto.json # gitignored; produced by PromptAgent
- experiments/ # gitignored; per-run dataframes + summaries
- rag_stores/ # gitignored; per-condition RAG store IDs
+  prompts/v1_initial.json       # tracked; all HITL trajectories start here
+  prompts/v*_auto.json          # gitignored; produced by PromptAgent
+  experiments/                  # gitignored; per-run dataframes + summaries
+  rag_stores/                   # gitignored; per-condition RAG store IDs
 ```
 
 ## Setup
 
 1. **Python 3.11+**. Create a virtualenv and install dependencies:
 
- ```bash
- python3 -m venv .venv
- source .venv/bin/activate
- pip install -r requirements.txt
- ```
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
 
 2. **Gemini API key.** Create `secrets.toml` in the project root:
 
- ```toml
- [api]
- key = "your-google-ai-studio-key"
- ```
+   ```toml
+   [api]
+   key = "your-google-ai-studio-key"
+   ```
 
 3. **MIMIC-III access.** PhysioNet credentialing + signed DUA required.
- Place the source CSVs under `data/new/`:
+   Place the source CSVs under `data/new/`:
 
- ```
- data/new/NOTEEVENTS.csv
- data/new/DIAGNOSES_ICD.csv
- data/new/D_ICD_DIAGNOSES.csv
- ```text
+   ```text
+   data/new/NOTEEVENTS.csv
+   data/new/DIAGNOSES_ICD.csv
+   data/new/D_ICD_DIAGNOSES.csv
+   ```
 
- Then run the one-time preprocessor to build the canonical parquet:
-
- ```bash
- PYTHONPATH=src python3 scripts/preprocess_new_data.py
- ```
-
- This produces `data/new/processed/notes_with_gold.parquet`, which the
- sampler reads at runtime (one row per admission, joined with primary
- ICD-9 SEQ_NUM=1 and human-readable titles, chapter-tagged).
+   Then run the one-time preprocessor to build the canonical parquet,
+   producing `data/new/processed/notes_with_gold.parquet`, which the
+   sampler reads at runtime (one row per admission, joined with primary
+   ICD-9 SEQ_NUM=1 and human-readable titles, chapter-tagged).
 
 ## Running experiments
 
@@ -171,35 +118,27 @@ Menu options:
 - `5` prompt diff (visualises any patch file)
 
 Each option prompts you to pick `Auto` (LLM-as-judge) or `Human`
-(interactive Tk UI) review mode.
+(interactive Tk UI) review mode. For the RAG condition, the multi-run
+prompt additionally asks whether to warm up the retrieval store with one
+preparatory annotate-and-review pass before iteration 1 (no prompt patch
+applied from the warm-up).
 
-### Reproducing the paper's SQ2 trajectories
+### Reproducing the paper's HITL trajectories
 
 The five HITL conditions reported in the paper (n=50 × 3 iters each)
-were produced by:
-
-```bash
-# baseline_hitl, cot_hitl, consistency_hitl
-PYTHONPATH=src python3 scripts/fill_sq2_gaps.py
-
-# few_shot_hitl, rag_hitl
-rm -f logs/rag_stores/rag_hitl.txt # fresh RAG store
-PYTHONPATH=src python3 scripts/fill_sq2_round2.py
-
-# strict + lenient rescore on the new files
-PYTHONPATH=src python3 scripts/rescore_with_all_icds.py \
- --source-glob "logs/experiments/*_hitl/*_v20*.json"
-
-# the paper's per-technique trajectory figure
-PYTHONPATH=src python3 scripts/make_sq2_trajectory_figure.py
-```
+were produced through the CLI's longitudinal-study option (menu choice
+4) with `Auto` reviewer mode. Per-iteration prompts and hyperparameters
+are detailed in the paper's reproducibility appendix. Per-case JSON
+records embed MIMIC-III note text and are not redistributed; reproducing
+the reported numbers requires a credentialled MIMIC-III copy and
+re-running the loop against it.
 
 ### Adding a new HITL technique
 
 1. Add a `TechniqueConfig(...)` entry to `EXPERIMENTS` in
- [src/main.py](src/main.py).
+   [src/main.py](src/main.py).
 2. Add a corresponding entry to `RAG_STORE_PATHS` (use `None` if your
- technique doesn't use RAG).
+   technique doesn't use RAG).
 3. The longitudinal driver picks it up automatically.
 
 ### Auto-reviewer vs human-reviewer
@@ -209,37 +148,38 @@ case_num, total_cases) → dict` interface. The auto-reviewer
 ([src/modules/auto_reviewer.py](src/modules/auto_reviewer.py)) calls
 Gemini 2.5-flash with a schema-enforced judgment prompt; the human
 reviewer ([src/modules/human_reviewer.py](src/modules/human_reviewer.py))
-opens a Tkinter UI. Judge-vs-clinician agreement was validated
-separately at n=50 (Cohen's κ = 0.747; see appendix).
+opens a Tkinter UI. Judge-vs-author agreement was validated on the
+hand-reviewed n=100 baseline at Cohen's κ = 0.82 (strict) and 0.77
+(lenient); see paper §3.4.
 
 ## Evaluation philosophy
 
 - The annotator's gold labels are MIMIC-III's billed primary ICD-9 codes
- (SEQ_NUM=1). Hospital coders assign these following DRG billing
- conventions, they are **not** clinically authoritative. We therefore
- always report **strict** (vs SEQ_NUM=1) *and* **lenient** (vs any
- billed ICD-9) accuracy side by side.
+  (SEQ_NUM=1). Hospital coders assign these following DRG billing
+  conventions, they are **not** clinically authoritative. We therefore
+  always report **strict** (vs SEQ_NUM=1) *and* **lenient** (vs any
+  billed ICD-9) accuracy side by side.
 - Admin-chapter admissions (V-codes, Perinatal, Symptoms/ill-defined)
- are excluded from the clinical-annotation metric because their primary
- code is administrative by convention rather than clinical.
+  are excluded from the clinical-annotation metric because their primary
+  code is administrative by convention rather than clinical.
 - The judge model is held constant across all conditions to isolate
- annotator-side effects.
+  annotator-side effects.
 - Every run draws a fresh stratified sample (no training-set leakage
- across iterations); the 200-row holdout is reserved across all runs
- for out-of-sample evaluation when needed.
+  across iterations); the 200-row holdout is reserved across all runs
+  for out-of-sample evaluation when needed.
 
 ## Configuration knobs
 
 `src/modules/technique_config.py` exposes the per-condition toggles:
 
-| flag | effect |
-|, |, |
-| `use_rag` | retrieve top-k similar past cases and inject as in-context examples |
-| `use_self_consistency` | 5-sample majority vote at T=0.7 |
-| `chain_of_thoughts` | reasoning scaffold before structured output |
-| `use_few_shot` | three hand-curated worked examples |
-| `use_prompt_patching` | PromptAgent proposes instruction-level edits between iters |
-| `use_feedback_routing` | route terminology_gap → RAG, others → PromptAgent |
+| flag                   | effect                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `use_rag`              | retrieve similar past cases via Gemini File Search and ground generation on them server-side      |
+| `use_self_consistency` | 3-sample majority vote at T=0.7                                                                   |
+| `chain_of_thoughts`    | reasoning scaffold before structured output                                                       |
+| `use_few_shot`         | five hand-curated worked examples                                                                 |
+| `use_prompt_patching`  | PromptAgent proposes instruction-level edits between iters                                        |
+| `use_feedback_routing` | routes recoverable failure modes to PromptAgent and ambiguous-case failures out of the loop       |
 
 A "HITL condition" = a `TechniqueConfig` with `use_prompt_patching` and
 `use_feedback_routing` set to True, optionally combined with one or

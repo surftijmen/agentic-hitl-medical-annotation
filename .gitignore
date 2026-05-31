@@ -222,6 +222,10 @@ rag.index
 # docs (paper drafts, slides, figures — excluded from VCS)
 docs/
 
+# scripts (internal paper-building and analysis scripts — not part of the
+# released framework)
+scripts/
+
 # Claude
 CLAUDE.md
 .claude/

@@ -225,6 +225,7 @@ def run_pipeline(
     max_workers: int = 5,
     sampler: Optional[DataSampler] = None,
     annotator_model: str = "gemini-2.5-flash",
+    precomputed_annotations: Optional[Dict[int, dict]] = None,
 ):
     """
     Execute one full annotation pipeline run with human-in-the-loop review.
@@ -302,15 +303,25 @@ def run_pipeline(
     # 8 workers stays safely under Gemini's per-minute RPM cap at flash/pro
     # rates while still parallelising batches of 200. Higher concurrency
     # triggers thundering-herd retries that waste time net-negative.
-    annotator_workers = min(sample_size, 8)
-    print(f"  [6/8] Generating annotations (parallel, {annotator_workers} workers)...")
+    # Env override lets self-consistency (5 internal calls per chart) drop
+    # to a lower worker count without thrashing.
+    annotator_workers = int(os.environ.get("ANNOTATOR_WORKERS", min(sample_size, 8)))
+    if precomputed_annotations is not None:
+        print(f"  [6/8] Reusing {len(precomputed_annotations)} precomputed annotations "
+              f"(no API calls this iteration)...")
+    else:
+        print(f"  [6/8] Generating annotations (parallel, {annotator_workers} workers)...")
     rows = list(batch.iterrows())
 
     def _annotate(args):
         i, (_, row) = args
         text = Annotator.redact_discharge_section(row["TEXT"])
         text = Annotator.clean_mimic_note(text)
-        annotation = annotator.analyze_medical_text(text)
+        annotation = None
+        if precomputed_annotations is not None:
+            annotation = precomputed_annotations.get(row["HADM_ID"])
+        if annotation is None:
+            annotation = annotator.analyze_medical_text(text)
         return i, row, text, annotation
 
     _ann_results: Dict[int, tuple] = {}
@@ -550,11 +561,17 @@ def run_multi_pipeline(
     reviewer_mode: str = "human",
     judge_model: str = "gemini-2.5-flash",
     annotator_model: str = "gemini-2.5-flash",
+    seed_rag_first: bool = False,
 ):
     """
     Run one experiment multiple times in sequence.
     Each run benefits from accumulated RAG cases and an improving prompt.
     Shows the learning trajectory for a single technique combination.
+
+    seed_rag_first: if True and RAG is enabled, run one extra annotate+review
+    pass BEFORE the normal trajectory to populate the retrieval store. The
+    warm-up pass does NOT update the prompt — only the RAG store. Used so that
+    iteration 1 of the reported trajectory already has retrieval available.
     """
     config = EXPERIMENTS[experiment_name]
     rag_store_path = RAG_STORE_PATHS.get(experiment_name)
@@ -571,6 +588,27 @@ def run_multi_pipeline(
 
     prompt_path = initial_prompt_path
     all_metrics = []
+
+    if seed_rag_first and rag is not None and config.use_rag:
+        print("\n" + "=" * 60)
+        print("  RAG WARM-UP PASS  (iteration 0)")
+        print("  Annotate + review one batch to populate the retrieval store.")
+        print("  No prompt patch is applied from this pass.")
+        print("=" * 60)
+        run_pipeline(
+            sample_size=sample_size,
+            debug=debug,
+            prompt_path=prompt_path,
+            technique_config=config,
+            rag=rag,
+            experiment_name=experiment_name,
+            run_number=0,
+            reviewer_mode=reviewer_mode,
+            judge_model=judge_model,
+            sampler=shared_sampler,
+            annotator_model=annotator_model,
+        )
+        print(f"  Warm-up complete. RAG store now populated; entering iteration 1.")
 
     for run_num in range(1, num_runs + 1):
         print(f"\n{'=' * 60}")
@@ -1069,6 +1107,12 @@ def interactive_cli():
             n = _ask_int("Sample size per run", 10)
             r = _ask_int("Number of runs", 3)
             reviewer_mode, judge_model = _ask_reviewer_mode()
+            seed_rag = False
+            if EXPERIMENTS[exp].use_rag:
+                ans = input("Warm up RAG before iter 1? "
+                            "(extra annotate+review pass to populate the store; "
+                            "no prompt patch) [y/N]: ").strip().lower()
+                seed_rag = ans in ("y", "yes")
             run_multi_pipeline(
                 num_runs=r,
                 sample_size=n,
@@ -1076,6 +1120,7 @@ def interactive_cli():
                 experiment_name=exp,
                 reviewer_mode=reviewer_mode,
                 judge_model=judge_model,
+                seed_rag_first=seed_rag,
             )
 
         elif choice == "3":
