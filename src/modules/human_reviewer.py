@@ -351,7 +351,11 @@ class HumanReviewer:
         # ── Model output ──────────────────────────────────────────
         self.diagnosis_box.config(state=tk.NORMAL)
         self.diagnosis_box.delete("1.0", tk.END)
-        self.diagnosis_box.insert(tk.END, f"Diagnosis: {annotation.get('diagnosis', 'N/A')}")
+        dx_text = f"Diagnosis: {annotation.get('diagnosis', 'N/A')}"
+        auto_correct = annotation.get("_auto_correct")
+        if auto_correct is not None:
+            dx_text += f"\nAuto-judge: {'✓ correct' if auto_correct else '✗ incorrect'}"
+        self.diagnosis_box.insert(tk.END, dx_text)
         self.diagnosis_box.config(state=tk.DISABLED)
         conf = annotation.get("confidence_level", "N/A")
         cons = annotation.get("consistency_score")
