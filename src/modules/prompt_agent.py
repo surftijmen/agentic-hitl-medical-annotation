@@ -82,6 +82,7 @@ class PromptAgent:
         self,
         base_prompt: Dict,
         aggregated_failures: Dict[str, Dict],
+        parsed_feedback: List[Dict],
     ) -> str:
         failures_text = []
 
@@ -95,6 +96,15 @@ Reviewer examples:
 {chr(10).join('- ' + ex for ex in info['examples'][:3])}
 """
             )
+
+        all_comments = [
+            (fb.get("human_rationale") or "").strip()
+            for fb in parsed_feedback
+            if fb.get("outcome") == "incorrect" and fb.get("human_rationale")
+        ]
+        all_comments_text = (
+            "\n".join(f"- {c}" for c in all_comments) if all_comments else "(none)"
+        )
 
         return f"""
 You are assisting with IMPROVING an existing medical information extraction prompt.
@@ -125,11 +135,14 @@ CURRENT INSTRUCTIONS (BASELINE – TREAT AS VALIDATED):
 {chr(10).join('- ' + i for i in base_prompt.get("instructions", []))}
 ------------------------------------
 
-OBSERVED FAILURE MODES FROM HUMAN REVIEW:
+OBSERVED FAILURE MODES FROM HUMAN REVIEW (PRIMARY SIGNAL):
 {chr(10).join(failures_text)}
 
+ALL REVIEWER COMMENTS THIS ROUND (SUPPLEMENTARY — scan for patterns the failure-mode labels do not capture):
+{all_comments_text}
+
 TASK:
-Propose instruction-level patches only.
+Propose instruction-level patches only. Ground your decisions PRIMARILY in the failure-mode aggregation above; if a consistent pattern across the raw reviewer comments points to a fix the labels miss, incorporate it too.
 
 Return JSON in EXACTLY this format:
 
@@ -216,7 +229,7 @@ If no changes are needed, return empty lists.
                 "observed_failures": aggregated,
             }
 
-        llm_prompt = self._build_llm_prompt(base_prompt, aggregated)
+        llm_prompt = self._build_llm_prompt(base_prompt, aggregated, parsed_feedback)
         llm_result = self._call_llm(llm_prompt)
 
         if "error" in llm_result:
