@@ -1,3 +1,7 @@
+"""Tkinter GUI for the human reviewer. Captures verdict (correct/incorrect),
+failure mode, free-text comment, and confidence. Returns the same dict
+shape as AutoReviewer.review() so run_pipeline() is mode-agnostic.
+"""
 from typing import Dict, Optional
 import tkinter as tk
 from tkinter import ttk

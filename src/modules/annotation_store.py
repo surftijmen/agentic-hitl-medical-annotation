@@ -1,3 +1,7 @@
+"""Per-run record book of (chart, annotation, review) tuples. Source of the
+experiment JSON dump under logs/experiments/, and constructs RAG records
+(validated + corrected cases) for the retrieval store.
+"""
 from typing import Any, Dict, List, Optional, Union
 import pandas as pd
 from datetime import datetime

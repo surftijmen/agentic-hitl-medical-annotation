@@ -1,3 +1,7 @@
+"""LLM annotator. Builds the technique-conditioned user prompt (few-shot, CoT,
+RAG tool), calls Gemini, parses JSON output, and handles self-consistency
+voting. Also defines the authoritative TechniqueConfig dataclass.
+"""
 import json
 import re
 import time

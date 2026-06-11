@@ -1,3 +1,7 @@
+"""Converts reviewer dicts into structured signals with routing decisions and
+a low-confidence flag. The FAILURE_MODE_ROUTING map is reporting-only —
+PromptAgent patches every non-ambiguous failure regardless of route.
+"""
 from typing import Dict, Optional
 
 

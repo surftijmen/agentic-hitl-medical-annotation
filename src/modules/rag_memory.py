@@ -1,4 +1,8 @@
-# rag_memory.py
+"""Wrapper around Gemini File Search Store providing persistent per-experiment
+RAG memory. Uploads validated and corrected cases at end of each run;
+retrieval is server-side and surfaces via types.Tool(file_search=...)
+passed to the Annotator.
+"""
 import time
 import json
 import os

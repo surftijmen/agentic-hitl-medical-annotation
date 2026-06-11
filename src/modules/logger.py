@@ -1,3 +1,7 @@
+"""JSON-lines event logger and per-run summary writer. Append-safe and
+crash-safe: every event flushes immediately so a killed run still leaves
+an inspectable partial log under logs/events/{run_id}.json.
+"""
 import json
 import os
 from datetime import datetime

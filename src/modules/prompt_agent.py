@@ -1,3 +1,9 @@
+"""Proposes constrained instruction-level patches to the active prompt JSON
+via a meta-LLM call. Hard constraints in the meta-prompt forbid changes
+to system_prompt, query, allowed_diagnoses, or format_instruction —
+patches may only add new instructions or refine existing ones, subject
+to human approval before deployment.
+"""
 import json
 import os
 from datetime import datetime

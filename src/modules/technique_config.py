@@ -1,3 +1,9 @@
+"""Legacy standalone copy of the technique-flag dataclass — kept as inline
+documentation of what each flag means. The authoritative TechniqueConfig
+used at runtime lives in annotator_agent.py (main.py imports it from
+there). The two diverge on a few field defaults; treat annotator_agent.py
+as the source of truth.
+"""
 from dataclasses import dataclass
 
 @dataclass
